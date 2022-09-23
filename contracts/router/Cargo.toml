@@ -5,6 +5,7 @@ authors = ["Terraform Labs, PTE.", "DELIGHT LABS", "Eris Protocol"]
 edition = "2018"
 description = "A router contract - provides multi-step operations to facilitate single sign operation"
 license = "Apache-2.0"
+repository = "https://github.com/erisprotocol/contracts-kujira"
 
 exclude = [
   # Those files are rust-optimizer artifacts. You might want to commit them for convenience but they should not be part of the source code publication.
