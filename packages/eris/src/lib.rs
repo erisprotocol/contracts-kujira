@@ -1,4 +1,7 @@
+// pub mod asset;
 pub mod hub;
+pub mod querier;
+pub mod router;
 
 mod decimal_checked_ops {
     use cosmwasm_std::{Decimal, Decimal256, Fraction, OverflowError, StdError, Uint128, Uint256};

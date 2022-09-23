@@ -5,7 +5,7 @@ use cosmwasm_std::{
 };
 use serde::de::DeserializeOwned;
 
-use eris_staking::hub::{QueryMsg, StakeToken};
+use eris::hub::{QueryMsg, StakeToken};
 
 use crate::contract::query;
 use crate::state::State;

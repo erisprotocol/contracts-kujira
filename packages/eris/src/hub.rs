@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InstantiateMsg {
-    /// Code ID of the CW20 token contract
-    pub cw20_code_id: u64,
+    /// swap config
+    pub swap_config: SwapConfig,
     /// Account who can call certain privileged functions
     pub owner: String,
     /// Name of the liquid staking token
@@ -68,6 +68,12 @@ pub enum ExecuteMsg {
         protocol_fee_contract: Option<String>,
         /// Fees that are being applied during reinvest of staking rewards
         protocol_reward_fee: Option<Decimal>, // "1 is 100%, 0.05 is 5%"
+
+        /// adds paths to the swap config
+        add_to_swap_config: Option<Vec<SwapPath>>,
+
+        /// updates the whole swap config
+        swap_config: Option<SwapConfig>,
     },
 
     /// Submit an unbonding request to the current unbonding queue; automatically invokes `unbond`
@@ -188,6 +194,20 @@ pub struct StakeToken {
     pub denom: String,
     // supply of the stake token
     pub total_supply: Uint128,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, JsonSchema)]
+pub struct SwapConfig {
+    // denom of the stake token
+    pub router_contract: String,
+
+    // denom of the stake token
+    pub allowed_paths: Vec<SwapPath>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, JsonSchema)]
+pub struct SwapPath {
+    pub path: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

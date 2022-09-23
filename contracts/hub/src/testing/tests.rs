@@ -6,13 +6,15 @@ use cosmwasm_std::{
     to_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, DistributionMsg, Event, Order, OwnedDeps,
     Reply, ReplyOn, StdError, SubMsg, SubMsgResponse, Uint128, WasmMsg,
 };
-use eris_staking::DecimalCheckedOps;
+use eris::DecimalCheckedOps;
 
-use eris_staking::hub::{
+use eris::hub::{
     Batch, CallbackMsg, ConfigResponse, ExecuteMsg, FeeConfig, InstantiateMsg, PendingBatch,
-    QueryMsg, StakeToken, StateResponse, UnbondRequest, UnbondRequestsByBatchResponseItem,
-    UnbondRequestsByUserResponseItem, UnbondRequestsByUserResponseItemDetails,
+    QueryMsg, StakeToken, StateResponse, SwapConfig, SwapPath, UnbondRequest,
+    UnbondRequestsByBatchResponseItem, UnbondRequestsByUserResponseItem,
+    UnbondRequestsByUserResponseItemDetails,
 };
+use eris::router::SwapOperation;
 use kujira::msg::{DenomMsg, KujiraMsg};
 
 use crate::constants::CONTRACT_DENOM;
@@ -42,7 +44,17 @@ fn setup_test() -> OwnedDeps<MockStorage, MockApi, CustomQuerier> {
         mock_env_at_timestamp(10000),
         mock_info("deployer", &[]),
         InstantiateMsg {
-            cw20_code_id: 69420,
+            swap_config: SwapConfig {
+                router_contract: "router".to_string(),
+                allowed_paths: vec![
+                    SwapPath {
+                        path: vec!["usk".to_string(), "ukuji".to_string()],
+                    },
+                    SwapPath {
+                        path: vec!["ibc/abc".to_string(), "usk".to_string(), "ukuji".to_string()],
+                    },
+                ],
+            },
             owner: "owner".to_string(),
             denom: "stake".to_string(),
             epoch_period: 259200,   // 3 * 24 * 60 * 60 = 3 days
@@ -437,6 +449,93 @@ fn registering_unlocked_coins() {
     //         ),
     //     ]
     // );
+}
+
+#[test]
+fn swapping() {
+    let mut deps = setup_test();
+    let state = State::default();
+
+    // After withdrawing staking rewards, we have some unlocked coins. Some can be swapped for Luna,
+    // some can't.
+    state
+        .unlocked_coins
+        .save(
+            deps.as_mut().storage,
+            &vec![
+                Coin::new(123, "usk"),
+                Coin::new(234, "uluna"),
+                Coin::new(345, "uusd"),
+                Coin::new(69420, "ibc/abc"),
+            ],
+        )
+        .unwrap();
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(MOCK_CONTRACT_ADDR, &[]),
+        ExecuteMsg::Callback(CallbackMsg::Swap {}),
+    )
+    .unwrap();
+
+    assert_eq!(res.messages.len(), 2);
+    assert_eq!(
+        res.messages[0],
+        SubMsg::reply_on_success(
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: "router".to_string(),
+                funds: vec![Coin {
+                    denom: "usk".to_string(),
+                    amount: Uint128::new(123),
+                }],
+                msg: to_binary(&eris::router::ExecuteMsg::ExecuteSwapOperations {
+                    operations: vec![SwapOperation::Swap {
+                        offer_asset_info: "usk".to_string(),
+                        ask_asset_info: "ukuji".to_string()
+                    }],
+                    minimum_receive: None,
+                    to: None
+                })
+                .unwrap(),
+            }),
+            2
+        )
+    );
+
+    assert_eq!(
+        res.messages[1],
+        SubMsg::reply_on_success(
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: "router".to_string(),
+                funds: vec![Coin {
+                    denom: "ibc/abc".to_string(),
+                    amount: Uint128::new(69420),
+                }],
+                msg: to_binary(&eris::router::ExecuteMsg::ExecuteSwapOperations {
+                    operations: vec![
+                        SwapOperation::Swap {
+                            offer_asset_info: "ibc/abc".to_string(),
+                            ask_asset_info: "usk".to_string()
+                        },
+                        SwapOperation::Swap {
+                            offer_asset_info: "usk".to_string(),
+                            ask_asset_info: "ukuji".to_string()
+                        }
+                    ],
+                    minimum_receive: None,
+                    to: None
+                })
+                .unwrap(),
+            }),
+            2
+        )
+    );
+
+    // Storage should have been updated
+    // uluna from swap not added
+    let unlocked_coins = state.unlocked_coins.load(deps.as_ref().storage).unwrap();
+    assert_eq!(unlocked_coins, vec![Coin::new(234, "uluna"), Coin::new(345, "uusd"),]);
 }
 
 #[test]
@@ -1113,7 +1212,7 @@ fn withdrawing_unbonded() {
     assert_eq!(
         err,
         StdError::NotFound {
-            kind: "eris_staking::hub::Batch".to_string()
+            kind: "eris::hub::Batch".to_string()
         }
     );
 
@@ -1130,13 +1229,13 @@ fn withdrawing_unbonded() {
     assert_eq!(
         err1,
         StdError::NotFound {
-            kind: "eris_staking::hub::UnbondRequest".to_string()
+            kind: "eris::hub::UnbondRequest".to_string()
         }
     );
     assert_eq!(
         err2,
         StdError::NotFound {
-            kind: "eris_staking::hub::UnbondRequest".to_string()
+            kind: "eris::hub::UnbondRequest".to_string()
         }
     );
 
@@ -1170,7 +1269,7 @@ fn withdrawing_unbonded() {
     assert_eq!(
         err,
         StdError::NotFound {
-            kind: "eris_staking::hub::Batch".to_string()
+            kind: "eris::hub::Batch".to_string()
         }
     );
 
@@ -1182,7 +1281,7 @@ fn withdrawing_unbonded() {
     assert_eq!(
         err,
         StdError::NotFound {
-            kind: "eris_staking::hub::UnbondRequest".to_string()
+            kind: "eris::hub::UnbondRequest".to_string()
         }
     );
 }
@@ -1380,6 +1479,8 @@ fn update_fee() {
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract: None,
             protocol_reward_fee: Some(Decimal::from_ratio(11u128, 100u128)),
+            add_to_swap_config: None,
+            swap_config: None,
         },
     )
     .unwrap_err();
@@ -1392,6 +1493,8 @@ fn update_fee() {
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract: None,
             protocol_reward_fee: Some(Decimal::from_ratio(11u128, 100u128)),
+            add_to_swap_config: None,
+            swap_config: None,
         },
     )
     .unwrap_err();
@@ -1404,6 +1507,8 @@ fn update_fee() {
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract: Some("fee-new".to_string()),
             protocol_reward_fee: Some(Decimal::from_ratio(10u128, 100u128)),
+            add_to_swap_config: None,
+            swap_config: None,
         },
     )
     .unwrap();

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use cosmwasm_std::{
@@ -5,17 +6,19 @@ use cosmwasm_std::{
     Order, Response, StdError, StdResult, SubMsg, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
-use eris_staking::DecimalCheckedOps;
+use eris::DecimalCheckedOps;
 
-use eris_staking::hub::{
+use eris::hub::{
     Batch, CallbackMsg, ExecuteMsg, FeeConfig, InstantiateMsg, PendingBatch, StakeToken,
-    UnbondRequest,
+    SwapConfig, SwapPath, UnbondRequest,
 };
+use eris::router::SwapOperation;
 use kujira::msg::{DenomMsg, KujiraMsg};
 
 use crate::constants::{get_reward_fee_cap, CONTRACT_DENOM};
 use crate::helpers::{
     addr_validate_to_lower, dedupe_check_received_addrs, query_delegation, query_delegations,
+    validate_swap_paths,
 };
 use crate::math::{
     compute_mint_amount, compute_redelegations_for_rebalancing, compute_redelegations_for_removal,
@@ -66,6 +69,12 @@ pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> StdResult<Re
             est_unbond_start_time: env.block.time.seconds() + msg.epoch_period,
         },
     )?;
+
+    deps.api.addr_validate(&msg.swap_config.router_contract)?;
+
+    addr_validate_to_lower(deps.api, msg.swap_config.router_contract.as_str())?;
+    validate_swap_paths(&msg.swap_config.allowed_paths)?;
+    state.swap_config.save(deps.storage, &msg.swap_config)?;
 
     let addr = env.contract.address;
     let denom = format!("factory/{0}/{1}", addr, msg.denom);
@@ -188,44 +197,62 @@ pub fn harvest(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
 
 /// swaps all unlocked coins to token
 pub fn swap(deps: DepsMut) -> StdResult<Response<KujiraMsg>> {
-    // let state = State::default();
-    // let mut unlocked_coins = state.unlocked_coins.load(deps.storage)?;
-    // let swap_config = state.swap_config.load(deps.storage)?;
+    let state = State::default();
+    let mut unlocked_coins = state.unlocked_coins.load(deps.storage)?;
+    let swap_config = state.swap_config.load(deps.storage)?;
+    let router_contract = swap_config.router_contract;
 
-    // let known_denoms =
-    //     swap_config.into_iter().map(|item| (item.denom, item.contract)).collect::<HashMap<_, _>>();
+    // create hashmap of supported tokens
+    let known_denoms = swap_config
+        .allowed_paths
+        .into_iter()
+        .map(|item| (item.path[0].clone(), item.path))
+        .collect::<HashMap<_, _>>();
 
-    // let swap_submsgs = unlocked_coins
-    //     .iter()
-    //     .cloned()
-    //     .filter(|coin| known_denoms.contains_key(&coin.denom))
-    //     .map(|coin| {
-    //         SubMsg::reply_on_success(
-    //             Asset {
-    //                 info: eris::asset::AssetInfo::NativeToken {
-    //                     denom: coin.denom.clone(),
-    //                 },
-    //                 amount: coin.amount,
-    //             }
-    //             .into_swap_msg(
-    //                 &deps.querier,
-    //                 known_denoms.get(&coin.denom).unwrap().to_string(),
-    //                 None,
-    //                 None,
-    //             )
-    //             .unwrap(),
-    //             // 2 is used for parsing coin_received, receiver == contract_addr, amount value
-    //             2,
-    //         )
-    //     })
-    //     .collect::<Vec<_>>();
+    // create router swap messages
+    let swap_submsgs: Vec<SubMsg<KujiraMsg>> = unlocked_coins
+        .iter()
+        .cloned()
+        .filter(|coin| known_denoms.contains_key(&coin.denom))
+        .map(|coin| {
+            Ok(SubMsg::reply_on_success(
+                CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr: router_contract.clone(),
+                    funds: vec![coin.clone()],
+                    msg: to_binary(&eris::router::ExecuteMsg::ExecuteSwapOperations {
+                        operations: get_operations(known_denoms.get(&coin.denom).unwrap()),
+                        minimum_receive: None,
+                        to: None,
+                    })?,
+                }),
+                // 2 is used for parsing coin_received, receiver == contract_addr, amount value
+                2,
+            ))
+        })
+        .collect::<StdResult<Vec<_>>>()?;
 
-    // unlocked_coins.retain(|coin| !known_denoms.contains_key(&coin.denom));
-    // state.unlocked_coins.save(deps.storage, &unlocked_coins)?;
+    // remove all swapped coins
+    unlocked_coins.retain(|coin| !known_denoms.contains_key(&coin.denom));
+    state.unlocked_coins.save(deps.storage, &unlocked_coins)?;
 
-    Ok(Response::new()
-        // .add_submessages(swap_submsgs)
-        .add_attribute("action", "erishub/swap"))
+    Ok(Response::new().add_submessages(swap_submsgs).add_attribute("action", "erishub/swap"))
+}
+
+fn get_operations(path: &[String]) -> Vec<SwapOperation> {
+    let mut offer: Option<String> = None;
+    let mut operations: Vec<SwapOperation> = vec![];
+
+    for part in path {
+        if let Some(offer) = offer {
+            operations.push(SwapOperation::Swap {
+                offer_asset_info: offer,
+                ask_asset_info: part.clone(),
+            });
+        }
+        offer = Some(part.clone());
+    }
+
+    operations
 }
 
 /// NOTE:
@@ -741,6 +768,8 @@ pub fn update_config(
     sender: Addr,
     protocol_fee_contract: Option<String>,
     protocol_reward_fee: Option<Decimal>,
+    add_to_swap_config: Option<Vec<SwapPath>>,
+    swap_config: Option<SwapConfig>,
 ) -> StdResult<Response<KujiraMsg>> {
     let state = State::default();
 
@@ -760,6 +789,28 @@ pub fn update_config(
     }
 
     state.fee_config.save(deps.storage, &fee_config)?;
+
+    if add_to_swap_config.is_some() && swap_config.is_some() {
+        return Err(StdError::generic_err("only set 'add_to_swap_config' or 'swap_config'"));
+    }
+
+    if let Some(swap_config) = swap_config {
+        addr_validate_to_lower(deps.api, swap_config.router_contract.as_str())?;
+        validate_swap_paths(&swap_config.allowed_paths)?;
+        state.swap_config.save(deps.storage, &swap_config)?;
+    }
+
+    if let Some(add_to_swap_config) = add_to_swap_config {
+        state.swap_config.update(deps.storage, |mut config| -> StdResult<_> {
+            for path in add_to_swap_config {
+                config.allowed_paths.push(path);
+            }
+
+            validate_swap_paths(&config.allowed_paths)?;
+
+            Ok(config)
+        })?;
+    }
 
     Ok(Response::new().add_attribute("action", "erishub/update_config"))
 }

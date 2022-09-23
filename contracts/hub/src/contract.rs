@@ -4,7 +4,7 @@ use cosmwasm_std::{
 };
 use cw2::set_contract_version;
 
-use eris_staking::hub::{CallbackMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
+use eris::hub::{CallbackMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
 use kujira::msg::KujiraMsg;
 
 use crate::constants::{CONTRACT_DENOM, CONTRACT_NAME, CONTRACT_VERSION};
@@ -73,7 +73,16 @@ pub fn execute(
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract,
             protocol_reward_fee,
-        } => execute::update_config(deps, info.sender, protocol_fee_contract, protocol_reward_fee),
+            add_to_swap_config,
+            swap_config,
+        } => execute::update_config(
+            deps,
+            info.sender,
+            protocol_fee_contract,
+            protocol_reward_fee,
+            add_to_swap_config,
+            swap_config,
+        ),
         ExecuteMsg::QueueUnbond {
             receiver,
         } => {

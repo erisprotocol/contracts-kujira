@@ -3,39 +3,25 @@
   "title": "InstantiateMsg",
   "type": "object",
   "required": [
-    "cw20_code_id",
-    "decimals",
+    "denom",
     "epoch_period",
-    "name",
     "owner",
     "protocol_fee_contract",
     "protocol_reward_fee",
-    "symbol",
+    "swap_config",
     "unbond_period",
     "validators"
   ],
   "properties": {
-    "cw20_code_id": {
-      "description": "Code ID of the CW20 token contract",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "decimals": {
-      "description": "Number of decimals of the liquid staking token",
-      "type": "integer",
-      "format": "uint8",
-      "minimum": 0.0
+    "denom": {
+      "description": "Name of the liquid staking token",
+      "type": "string"
     },
     "epoch_period": {
       "description": "How often the unbonding queue is to be executed, in seconds",
       "type": "integer",
       "format": "uint64",
       "minimum": 0.0
-    },
-    "name": {
-      "description": "Name of the liquid staking token",
-      "type": "string"
     },
     "owner": {
       "description": "Account who can call certain privileged functions",
@@ -53,9 +39,13 @@
         }
       ]
     },
-    "symbol": {
-      "description": "Symbol of the liquid staking token",
-      "type": "string"
+    "swap_config": {
+      "description": "swap config",
+      "allOf": [
+        {
+          "$ref": "#/definitions/SwapConfig"
+        }
+      ]
     },
     "unbond_period": {
       "description": "The staking module's unbonding time, in seconds",
@@ -75,6 +65,38 @@
     "Decimal": {
       "description": "A fixed-point decimal value with 18 fractional digits, i.e. Decimal(1_000_000_000_000_000_000) == 1.0\n\nThe greatest possible value that can be represented is 340282366920938463463.374607431768211455 (which is (2^128 - 1) / 10^18)",
       "type": "string"
+    },
+    "SwapConfig": {
+      "type": "object",
+      "required": [
+        "allowed_paths",
+        "router_contract"
+      ],
+      "properties": {
+        "allowed_paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SwapPath"
+          }
+        },
+        "router_contract": {
+          "type": "string"
+        }
+      }
+    },
+    "SwapPath": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     }
   }
 }

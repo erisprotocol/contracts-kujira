@@ -4,6 +4,7 @@ use crate::types::Delegation;
 use cosmwasm_std::{
     Addr, Api, Coin, QuerierWrapper, Reply, StdError, StdResult, SubMsgResponse, Uint128,
 };
+use eris::hub::SwapPath;
 
 /// Unwrap a `Reply` object to extract the response
 pub(crate) fn unwrap_reply(reply: Reply) -> StdResult<SubMsgResponse> {
@@ -112,4 +113,25 @@ pub fn addr_validate_to_lower(api: &dyn Api, addr: &str) -> StdResult<Addr> {
         return Err(StdError::generic_err(format!("Address {} should be lowercase", addr)));
     }
     api.addr_validate(addr)
+}
+
+pub fn validate_swap_paths(paths: &[SwapPath]) -> StdResult<()> {
+    let mut set = HashSet::new();
+    for path in paths {
+        if path.path.len() <= 1 {
+            return Err(StdError::generic_err("invalid path length"));
+        }
+
+        if path.path.last().unwrap() != "ukuji" {
+            return Err(StdError::generic_err("path needs to end with 'ukuji'"));
+        }
+
+        if !set.insert(path.path[0].clone()) {
+            return Err(StdError::generic_err(format!(
+                "start denom '{}' duplicated",
+                path.path[0].clone()
+            )));
+        }
+    }
+    Ok(())
 }

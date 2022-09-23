@@ -1,12 +1,12 @@
 [package]
-name = "eris-staking"
+name = "eris"
 version = "1.0.1"
 authors = ["devs <devs@erisprotocol.com>"]
 edition = "2018"
 description = "Liquid staking protocol for the cosmos"
 license = "GPL-3.0-or-later"
 homepage = "https://www.erisprotocol.com"
-repository = "https://github.com/erisprotocol/liquid-staking-contracts"
+repository = "https://github.com/erisprotocol/contracts-kujira"
 
 [dependencies]
 cosmwasm-std = "1.0.0"

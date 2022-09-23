@@ -4,7 +4,7 @@ version = "1.1.1"
 authors = ["devs <devs@erisprotocol.com>"]
 edition = "2018"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/erisprotocol/liquid-staking-contracts"
+repository = "https://github.com/erisprotocol/contracts-kujira"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -17,7 +17,7 @@ cosmwasm-std = { version = "1.0.0", features = ["staking"] }
 cw2 = "0.13.2"
 cw20 = "0.13.2"
 cw-storage-plus = "0.13.2"
-eris-staking = { path = "../../packages/eris-staking" }
+eris = { path = "../../packages/eris" }
 kujira = "0.7.13"
 
 [dev-dependencies]
