@@ -297,6 +297,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "eris-router"
+version = "0.1.0"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cosmwasm-storage",
+ "cw-storage-plus",
+ "cw2",
+ "cw20",
+ "eris",
+ "integer-sqrt",
+ "kujira",
+ "schemars",
+ "serde",
+]
+
+[[package]]
 name = "eris-staking-hub"
 version = "1.1.1"
 dependencies = [
@@ -505,23 +522,6 @@ dependencies = [
  "crypto-bigint",
  "hmac",
  "zeroize",
-]
-
-[[package]]
-name = "router"
-version = "0.1.0"
-dependencies = [
- "cosmwasm-schema",
- "cosmwasm-std",
- "cosmwasm-storage",
- "cw-storage-plus",
- "cw2",
- "cw20",
- "eris",
- "integer-sqrt",
- "kujira",
- "schemars",
- "serde",
 ]
 
 [[package]]

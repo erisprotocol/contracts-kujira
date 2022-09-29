@@ -1,54 +1,33 @@
-# Terraswap Router <!-- omit in toc -->
+# Eris Router <!-- omit in toc -->
 
-The Router Contract contains the logic to facilitate multi-hop swap operations via terraswap.
+The Router Contract contains the logic to facilitate multi-hop swap operations via FIN.
 
-**Only Terraswap is supported.**
+**Only FIN is supported.**
 
-phoenix-1 Contract:
-- https://finder.terra.money/mainnet/address/terra13ehuhysn5mqjeaheeuew2gjs785f6k7jm8vfsqg3jhtpkwppcmzqcu7chk
-
-pisco-1 Contract: 
-- https://finder.terra.money/testnet/address/terra1xp6xe6uwqrspumrkazdg90876ns4h78yw03vfxghhcy03yexcrcsdaqvc8
-
-Tx: 
-- Luna => DELIGHT => TNT: https://finder.terra.money/testnet/tx/CCBE3E2C746967A03CAD13B7FCAB4BD823BE54883290F3BEE7A213DC6096A39A
+TODO: ADD contract links + example transaction
 
 ### Operations Assertion
+
 The contract will check whether the resulting token is swapped into one token.
 
 ### Example
 
-Swap Luna => DELIGHT => TNT
+Swap Luna => axlUSDC => Kuji
+
 ```
 {
    "execute_swap_operations":{
       "operations":[
          {
-            "terra_swap":{
-               "offer_asset_info":{
-                  "native_token":{
-                     "denom":"uluna"
-                  }
-               },
-               "ask_asset_info":{
-                  "token":{
-                     "contract_addr":"terra1cl0kw9axzpzkw58snj6cy0hfp0xp8xh9tudpw2exvzuupn3fafwqqhjc24"
-                  }
-               }
+            "swap":{
+               "offer_asset_info": "ibc/DA59C009A0B3B95E0549E6BF7B075C8239285989FF457A8EDDBB56F10B2A6986",
+               "ask_asset_info": "ibc/295548A78785A1007F232DE286149A6FF512F180AF5657780FC89C009E2C348F"
             }
          },
          {
-            "terra_swap":{
-               "offer_asset_info":{
-                  "token":{
-                     "contract_addr":"terra1cl0kw9axzpzkw58snj6cy0hfp0xp8xh9tudpw2exvzuupn3fafwqqhjc24"
-                  }
-               },
-               "ask_asset_info":{
-                  "token":{
-                     "contract_addr":"terra1qnypzwqa03h8vqs0sxjp8hxw0xy5zfwyax26jgnl5k4lw92tjw0scdkrzm"
-                  }
-               }
+            "swap":{
+               "offer_asset_info":"ibc/295548A78785A1007F232DE286149A6FF512F180AF5657780FC89C009E2C348F",
+               "ask_asset_info":"ukuji"
             }
          }
       ],
