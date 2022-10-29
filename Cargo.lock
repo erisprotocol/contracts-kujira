@@ -331,7 +331,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "eris-staking-hub"
+name = "eris-staking-hub-kujira"
 version = "1.2.1"
 dependencies = [
  "cosmwasm-schema",
