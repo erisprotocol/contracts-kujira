@@ -85,12 +85,18 @@ pub fn dedupe(v: &mut Vec<String>) {
 }
 
 /// Dedupes and checks a list of received addrs
-pub fn dedupe_check_received_addrs(validators: &mut Vec<String>, api: &dyn Api) -> StdResult<()> {
+pub fn dedupe_check_received_addrs(validators: &mut Vec<String>, _api: &dyn Api) -> StdResult<()> {
     dedupe(validators);
 
-    for validator in validators {
-        api.addr_validate(validator.as_str())?;
-    }
+    // on kujira the addr_validate does not allow "kujiravaloper"-addresses
+    // Generic error: issue with kujiravaloper1hcdv29zzskacf4jxv62gxwq9jjnxcewmuq66x6 -
+    // Generic error: addr_validate errored: invalid Bech32 prefix; expected kujira, got
+
+    // for validator in validators {
+    //     api.addr_validate(validator.as_str()).map_err(|err| {
+    //         StdError::generic_err(format!("issue with {0} - {1}", validator, err))
+    //     })?;
+    // }
 
     Ok(())
 }

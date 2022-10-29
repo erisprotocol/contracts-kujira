@@ -15,9 +15,7 @@ use kujira::denom::Denom;
 use kujira::msg::{DenomMsg, KujiraMsg};
 
 use crate::constants::{get_reward_fee_cap, CONTRACT_DENOM};
-use crate::helpers::{
-    addr_validate_to_lower, dedupe_check_received_addrs, query_delegation, query_delegations,
-};
+use crate::helpers::{dedupe_check_received_addrs, query_delegation, query_delegations};
 use crate::math::{
     compute_mint_amount, compute_redelegations_for_rebalancing, compute_redelegations_for_removal,
     compute_unbond_amount, compute_undelegations, mark_reconciled_batches, reconcile_batches,
@@ -47,7 +45,7 @@ pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> StdResult<Re
 
     let mut validators = msg.validators;
     dedupe_check_received_addrs(&mut validators, deps.api)
-        .map_err(|_| StdError::generic_err("invalid validators"))?;
+        .map_err(|err| StdError::generic_err(format!("invalid validators {}", err)))?;
 
     state.validators.save(deps.storage, &validators)?;
     state.unlocked_coins.save(deps.storage, &vec![])?;
@@ -678,7 +676,8 @@ pub fn add_validator(
     let state = State::default();
 
     state.assert_owner(deps.storage, &sender)?;
-    addr_validate_to_lower(deps.api, validator.as_str())?;
+    // on kujira the addr_validate does not allow "kujiravaloper"-addresses
+    // addr_validate_to_lower(deps.api, validator.as_str())?;
 
     state.validators.update(deps.storage, |mut validators| {
         if validators.contains(&validator) {
