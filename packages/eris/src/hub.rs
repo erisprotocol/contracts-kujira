@@ -1,12 +1,13 @@
+use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{to_binary, Addr, Coin, CosmosMsg, Decimal, Empty, StdResult, Uint128, WasmMsg};
-use kujira::msg::KujiraMsg;
+use kujira::{denom::Denom, msg::KujiraMsg};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InstantiateMsg {
-    /// swap config
-    pub swap_config: SwapConfig,
+    /// fin multi contract addr
+    pub fin_multi_contract: String,
     /// Account who can call certain privileged functions
     pub owner: String,
     /// Name of the liquid staking token
@@ -52,7 +53,10 @@ pub enum ExecuteMsg {
     /// Accept an ownership transfer
     AcceptOwnership {},
     /// Claim staking rewards, swap all for Token, and restake
-    Harvest {},
+    Harvest {
+        withdrawals: Option<Vec<(Addr, Denom)>>,
+        stages: Option<Vec<Vec<(Addr, Denom)>>>,
+    },
     /// Use redelegations to balance the amounts of Token delegated to validators
     Rebalance {},
     /// Update Token amounts in unbonding batches to reflect any slashing or rounding errors
@@ -68,12 +72,6 @@ pub enum ExecuteMsg {
         protocol_fee_contract: Option<String>,
         /// Fees that are being applied during reinvest of staking rewards
         protocol_reward_fee: Option<Decimal>, // "1 is 100%, 0.05 is 5%"
-
-        /// adds paths to the swap config
-        add_to_swap_config: Option<Vec<SwapPath>>,
-
-        /// updates the whole swap config
-        swap_config: Option<SwapConfig>,
     },
 
     /// Submit an unbonding request to the current unbonding queue; automatically invokes `unbond`
@@ -86,10 +84,19 @@ pub enum ExecuteMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CallbackMsg {
+    ClaimFunds {
+        withdrawals: Option<Vec<(Addr, Denom)>>,
+    },
     /// Swap remaining tokens held by the contract to Token
-    Swap {},
+    Swap {
+        stages: Option<Vec<Vec<(Addr, Denom)>>>,
+    },
     /// Following the swaps, stake the Token acquired to the whitelisted validators
     Reinvest {},
+
+    CheckReceivedCoin {
+        snapshot: Coin,
+    },
 }
 
 impl CallbackMsg {
@@ -102,37 +109,45 @@ impl CallbackMsg {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
+#[derive(QueryResponses)]
 pub enum QueryMsg {
     /// The contract's configurations. Response: `ConfigResponse`
+    #[returns(ConfigResponse)]
     Config {},
     /// The contract's current state. Response: `StateResponse`
+    #[returns(StateResponse)]
     State {},
     /// The current batch on unbonding requests pending submission. Response: `PendingBatch`
+    #[returns(PendingBatch)]
     PendingBatch {},
     /// Query an individual batch that has previously been submitted for unbonding but have not yet
     /// fully withdrawn. Response: `Batch`
+    #[returns(Batch)]
     PreviousBatch(u64),
     /// Enumerate all previous batches that have previously been submitted for unbonding but have not
     /// yet fully withdrawn. Response: `Vec<Batch>`
+    #[returns(Vec<Batch>)]
     PreviousBatches {
         start_after: Option<u64>,
         limit: Option<u32>,
     },
     /// Enumerate all outstanding unbonding requests in a given batch. Response: `Vec<UnbondRequestsByBatchResponseItem>`
+    #[returns(Vec<UnbondRequestsByBatchResponseItem>)]
     UnbondRequestsByBatch {
         id: u64,
         start_after: Option<String>,
         limit: Option<u32>,
     },
     /// Enumreate all outstanding unbonding requests from given a user. Response: `Vec<UnbondRequestsByUserResponseItem>`
+    #[returns(Vec<UnbondRequestsByUserResponseItem>)]
     UnbondRequestsByUser {
         user: String,
         start_after: Option<u64>,
         limit: Option<u32>,
     },
     /// Enumreate all outstanding unbonding requests from given a user. Response: `Vec<UnbondRequestsByUserResponseItemDetails>`
+    #[returns(Vec<UnbondRequestsByUserResponseItemDetails>)]
     UnbondRequestsByUserDetails {
         user: String,
         start_after: Option<u64>,
@@ -194,20 +209,6 @@ pub struct StakeToken {
     pub denom: String,
     // supply of the stake token
     pub total_supply: Uint128,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, JsonSchema)]
-pub struct SwapConfig {
-    // denom of the stake token
-    pub router_contract: String,
-
-    // denom of the stake token
-    pub allowed_paths: Vec<SwapPath>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, JsonSchema)]
-pub struct SwapPath {
-    pub path: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

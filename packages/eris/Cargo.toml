@@ -1,6 +1,6 @@
 [package]
 name = "eris"
-version = "1.0.1"
+version = "1.2.1"
 authors = ["devs <devs@erisprotocol.com>"]
 edition = "2018"
 description = "Liquid staking protocol for the cosmos"
@@ -9,11 +9,10 @@ homepage = "https://www.erisprotocol.com"
 repository = "https://github.com/erisprotocol/contracts-kujira"
 
 [dependencies]
-cosmwasm-std = "1.0.0"
+cosmwasm-std = "1.1.3"
+cosmwasm-schema = "1.1.3"
 cw20 = "0.13.2"
 schemars = "0.8.1"
 serde = { version = "1.0.103", default-features = false, features = ["derive"] }
 kujira = "0.7.13"
 
-[dev-dependencies]
-cosmwasm-schema = "1.0.0"

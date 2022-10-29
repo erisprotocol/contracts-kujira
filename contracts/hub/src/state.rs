@@ -1,13 +1,16 @@
 use cosmwasm_std::{Addr, Coin, StdError, StdResult, Storage};
 use cw_storage_plus::{Index, IndexList, IndexedMap, Item, MultiIndex};
 
-use eris::hub::{Batch, FeeConfig, PendingBatch, StakeToken, SwapConfig, UnbondRequest};
+use eris::{
+    adapters::fin_multi::FinMulti,
+    hub::{Batch, FeeConfig, PendingBatch, StakeToken, UnbondRequest},
+};
 
 use crate::types::BooleanKey;
 
 pub(crate) struct State<'a> {
-    /// Account who can call certain privileged functions
-    pub swap_config: Item<'a, SwapConfig>,
+    /// Fin Multi Contract
+    pub fin_multi: Item<'a, FinMulti>,
     /// Account who can call certain privileged functions
     pub owner: Item<'a, Addr>,
     /// Pending ownership transfer, awaiting acceptance by the new owner
@@ -49,7 +52,7 @@ impl Default for State<'static> {
             ),
         };
         Self {
-            swap_config: Item::new("swap_config"),
+            fin_multi: Item::new("fin_multi"),
             owner: Item::new("owner"),
             new_owner: Item::new("new_owner"),
             stake_token: Item::new("stake_token"),

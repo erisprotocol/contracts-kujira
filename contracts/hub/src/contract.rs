@@ -1,6 +1,5 @@
 use cosmwasm_std::{
-    entry_point, to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response, StdError,
-    StdResult,
+    entry_point, to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult,
 };
 use cw2::set_contract_version;
 
@@ -8,7 +7,7 @@ use eris::hub::{CallbackMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
 use kujira::msg::KujiraMsg;
 
 use crate::constants::{CONTRACT_DENOM, CONTRACT_NAME, CONTRACT_VERSION};
-use crate::helpers::{parse_received_fund, unwrap_reply};
+use crate::helpers::parse_received_fund;
 use crate::state::State;
 use crate::{execute, queries};
 
@@ -65,7 +64,10 @@ pub fn execute(
             new_owner,
         } => execute::transfer_ownership(deps, info.sender, new_owner),
         ExecuteMsg::AcceptOwnership {} => execute::accept_ownership(deps, info.sender),
-        ExecuteMsg::Harvest {} => execute::harvest(deps, env),
+        ExecuteMsg::Harvest {
+            withdrawals,
+            stages,
+        } => execute::harvest(deps, env, withdrawals, stages),
         ExecuteMsg::Rebalance {} => execute::rebalance(deps, env),
         ExecuteMsg::Reconcile {} => execute::reconcile(deps, env),
         ExecuteMsg::SubmitBatch {} => execute::submit_batch(deps, env),
@@ -73,16 +75,7 @@ pub fn execute(
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract,
             protocol_reward_fee,
-            add_to_swap_config,
-            swap_config,
-        } => execute::update_config(
-            deps,
-            info.sender,
-            protocol_fee_contract,
-            protocol_reward_fee,
-            add_to_swap_config,
-            swap_config,
-        ),
+        } => execute::update_config(deps, info.sender, protocol_fee_contract, protocol_reward_fee),
         ExecuteMsg::QueueUnbond {
             receiver,
         } => {
@@ -122,23 +115,15 @@ fn callback(
 
     match callback_msg {
         CallbackMsg::Reinvest {} => execute::reinvest(deps, env),
-        CallbackMsg::Swap {} => execute::swap(deps),
-    }
-}
-
-#[entry_point]
-pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> StdResult<Response<KujiraMsg>> {
-    match reply.id {
-        // 1 => execute::register_stake_token(deps, unwrap_reply(reply)?),
-        2 => execute::register_received_coins(
-            deps,
-            env,
-            unwrap_reply(reply)?.events,
-            "coin_received",
-            "receiver",
-            "amount",
-        ),
-        id => Err(StdError::generic_err(format!("invalid reply id: {}; must be 2", id))),
+        CallbackMsg::ClaimFunds {
+            withdrawals,
+        } => execute::claim_funds(deps, env, withdrawals),
+        CallbackMsg::Swap {
+            stages,
+        } => execute::swap(deps, env, stages),
+        CallbackMsg::CheckReceivedCoin {
+            snapshot,
+        } => execute::callback_received_coins(deps, env, snapshot),
     }
 }
 

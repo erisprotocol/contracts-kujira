@@ -1,12 +1,14 @@
 use cosmwasm_std::testing::{mock_env, MockApi, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    from_binary, Addr, BlockInfo, ContractInfo, Deps, Env, OwnedDeps, QuerierResult, SystemError,
-    SystemResult, Timestamp, Uint128,
+    coin, from_binary, to_binary, Addr, BlockInfo, ContractInfo, CosmosMsg, Deps, Env, OwnedDeps,
+    QuerierResult, SubMsg, SystemError, SystemResult, Timestamp, Uint128, WasmMsg,
 };
+use kujira::msg::KujiraMsg;
 use serde::de::DeserializeOwned;
 
-use eris::hub::{QueryMsg, StakeToken};
+use eris::hub::{CallbackMsg, ExecuteMsg, QueryMsg, StakeToken};
 
+use crate::constants::CONTRACT_DENOM;
 use crate::contract::query;
 use crate::state::State;
 
@@ -69,4 +71,15 @@ pub(super) fn set_total_stake_supply(
             },
         )
         .unwrap();
+}
+
+pub fn check_received_coin(amount: u128) -> SubMsg<KujiraMsg> {
+    SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
+        contract_addr: MOCK_CONTRACT_ADDR.to_string(),
+        msg: to_binary(&ExecuteMsg::Callback(CallbackMsg::CheckReceivedCoin {
+            snapshot: coin(amount, CONTRACT_DENOM),
+        }))
+        .unwrap(),
+        funds: vec![],
+    }))
 }

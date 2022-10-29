@@ -1,24 +1,22 @@
-use std::collections::HashMap;
-use std::str::FromStr;
-
 use cosmwasm_std::{
     to_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, DepsMut, DistributionMsg, Env, Event,
-    Order, Response, StdError, StdResult, SubMsg, Uint128, WasmMsg,
+    Order, Response, StdError, StdResult, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
-use eris::DecimalCheckedOps;
+use eris::{CustomResponse, DecimalCheckedOps};
 
+use eris::adapters::bw_vault::BlackWhaleVault;
+use eris::adapters::fin_multi::FinMulti;
 use eris::hub::{
     Batch, CallbackMsg, ExecuteMsg, FeeConfig, InstantiateMsg, PendingBatch, StakeToken,
-    SwapConfig, SwapPath, UnbondRequest,
+    UnbondRequest,
 };
-use eris::router::SwapOperation;
+use kujira::denom::Denom;
 use kujira::msg::{DenomMsg, KujiraMsg};
 
 use crate::constants::{get_reward_fee_cap, CONTRACT_DENOM};
 use crate::helpers::{
     addr_validate_to_lower, dedupe_check_received_addrs, query_delegation, query_delegations,
-    validate_swap_paths,
 };
 use crate::math::{
     compute_mint_amount, compute_redelegations_for_rebalancing, compute_redelegations_for_removal,
@@ -70,11 +68,9 @@ pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> StdResult<Re
         },
     )?;
 
-    deps.api.addr_validate(&msg.swap_config.router_contract)?;
-
-    addr_validate_to_lower(deps.api, msg.swap_config.router_contract.as_str())?;
-    validate_swap_paths(&msg.swap_config.allowed_paths)?;
-    state.swap_config.save(deps.storage, &msg.swap_config)?;
+    state
+        .fin_multi
+        .save(deps.storage, &FinMulti(deps.api.addr_validate(&msg.fin_multi_contract)?))?;
 
     let addr = env.contract.address;
     let denom = format!("factory/{0}/{1}", addr, msg.denom);
@@ -139,120 +135,160 @@ pub fn bond(
         compute_mint_amount(ustake_supply, token_to_bond, &delegations)
     };
 
-    let delegate_submsg = SubMsg::reply_on_success(new_delegation.to_cosmos_msg(), 2);
-
-    // create mint message and add to stored total supply
-    stake.total_supply = stake.total_supply.checked_add(ustake_to_mint)?;
-    state.stake_token.save(deps.storage, &stake)?;
-    let mint_msg: CosmosMsg<KujiraMsg> = DenomMsg::Mint {
-        denom: stake.denom.into(),
-        amount: ustake_to_mint,
-        recipient: receiver.clone(),
-    }
-    .into();
-
     let event = Event::new("erishub/bonded")
         .add_attribute("time", env.block.time.seconds().to_string())
         .add_attribute("height", env.block.height.to_string())
-        .add_attribute("receiver", receiver)
+        .add_attribute("receiver", receiver.clone())
         .add_attribute("token_bonded", token_to_bond)
         .add_attribute("ustake_minted", ustake_to_mint);
 
-    let mut response: Response<KujiraMsg> = Response::new().add_submessage(delegate_submsg);
+    let mint_msg: Option<CosmosMsg<KujiraMsg>> = if donate {
+        None
+    } else {
+        // create mint message and add to stored total supply
+        stake.total_supply = stake.total_supply.checked_add(ustake_to_mint)?;
+        state.stake_token.save(deps.storage, &stake)?;
 
-    if !donate {
-        response = response.add_message(mint_msg);
-    }
+        Some(
+            DenomMsg::Mint {
+                denom: stake.denom.into(),
+                amount: ustake_to_mint,
+                recipient: receiver,
+            }
+            .into(),
+        )
+    };
 
-    response = response.add_event(event).add_attribute("action", "erishub/bond");
-
-    Ok(response)
+    Ok(Response::new()
+        .add_message(new_delegation.to_cosmos_msg())
+        .add_optional_message(mint_msg)
+        .add_message(check_received_coin_msg(&deps, &env, Some(token_to_bond))?)
+        .add_event(event)
+        .add_attribute("action", "erishub/bond"))
 }
 
-pub fn harvest(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
-    let withdraw_submsgs: Vec<SubMsg<KujiraMsg>> = deps
+pub fn harvest(
+    deps: DepsMut,
+    env: Env,
+    withdrawals: Option<Vec<(Addr, Denom)>>,
+    stages: Option<Vec<Vec<(Addr, Denom)>>>,
+) -> StdResult<Response<KujiraMsg>> {
+    // 1. withdraw delegation rewards
+    let withdraw_submsgs: Vec<CosmosMsg<KujiraMsg>> = deps
         .querier
         .query_all_delegations(&env.contract.address)?
         .into_iter()
+        .filter(|d| !d.amount.amount.is_zero())
         .map(|d| {
-            SubMsg::reply_on_success(
-                CosmosMsg::Distribution(DistributionMsg::WithdrawDelegatorReward {
-                    validator: d.validator,
-                }),
-                2,
-            )
+            CosmosMsg::Distribution(DistributionMsg::WithdrawDelegatorReward {
+                validator: d.validator,
+            })
         })
         .collect::<Vec<_>>();
 
-    let callback_msgs: Vec<CosmosMsg<KujiraMsg>> = vec![CallbackMsg::Reinvest {}]
-        .iter()
-        .map(|callback| callback.into_cosmos_msg(&env.contract.address))
-        .collect::<StdResult<Vec<_>>>()?;
+    let claim_funds_msg = withdrawals.map(|w| CallbackMsg::ClaimFunds {
+        withdrawals: Some(w),
+    });
+
+    let swap_msg = stages.map(|s| CallbackMsg::Swap {
+        stages: Some(s),
+    });
 
     Ok(Response::new()
-        .add_submessages(withdraw_submsgs)
-        .add_messages(callback_msgs)
+        // 1. withdraw delegation rewards
+        .add_messages(withdraw_submsgs)
+        // 2. claim funds
+        .add_optional_callback(&env, claim_funds_msg)?
+        // 3. swap
+        .add_optional_callback(&env, swap_msg)?
+        // 4. apply received total ukuji to unlocked_coins
+        .add_message(check_received_coin_msg(&deps, &env, None)?)
+        // 5. restake unlocked_coins
+        .add_callback(&env, CallbackMsg::Reinvest {})?
         .add_attribute("action", "erishub/harvest"))
 }
 
-/// swaps all unlocked coins to token
-pub fn swap(deps: DepsMut) -> StdResult<Response<KujiraMsg>> {
-    let state = State::default();
-    let mut unlocked_coins = state.unlocked_coins.load(deps.storage)?;
-    let swap_config = state.swap_config.load(deps.storage)?;
-    let router_contract = swap_config.router_contract;
+pub fn claim_funds(
+    deps: DepsMut,
+    env: Env,
+    withdrawals: Option<Vec<(Addr, Denom)>>,
+) -> StdResult<Response<KujiraMsg>> {
+    let mut withdraw_msgs: Vec<CosmosMsg<KujiraMsg>> = vec![];
+    if let Some(withdrawals) = withdrawals {
+        let balances = deps.querier.query_all_balances(env.contract.address)?;
 
-    // create hashmap of supported tokens
-    let known_denoms = swap_config
-        .allowed_paths
-        .into_iter()
-        .map(|item| (item.path[0].clone(), item.path))
-        .collect::<HashMap<_, _>>();
+        for (addr, denom) in withdrawals {
+            let balance = balances.iter().find(|b| b.denom == denom.to_string());
 
-    // create router swap messages
-    let swap_submsgs: Vec<SubMsg<KujiraMsg>> = unlocked_coins
-        .iter()
-        .cloned()
-        .filter(|coin| known_denoms.contains_key(&coin.denom))
-        .map(|coin| {
-            Ok(SubMsg::reply_on_success(
-                CosmosMsg::Wasm(WasmMsg::Execute {
-                    contract_addr: router_contract.clone(),
-                    funds: vec![coin.clone()],
-                    msg: to_binary(&eris::router::ExecuteMsg::ExecuteSwapOperations {
-                        operations: get_operations(known_denoms.get(&coin.denom).unwrap()),
-                        minimum_receive: None,
-                        to: None,
-                    })?,
-                }),
-                // 2 is used for parsing coin_received, receiver == contract_addr, amount value
-                2,
-            ))
-        })
-        .collect::<StdResult<Vec<_>>>()?;
-
-    // remove all swapped coins
-    unlocked_coins.retain(|coin| !known_denoms.contains_key(&coin.denom));
-    state.unlocked_coins.save(deps.storage, &unlocked_coins)?;
-
-    Ok(Response::new().add_submessages(swap_submsgs).add_attribute("action", "erishub/swap"))
-}
-
-fn get_operations(path: &[String]) -> Vec<SwapOperation> {
-    let mut offer: Option<String> = None;
-    let mut operations: Vec<SwapOperation> = vec![];
-
-    for part in path {
-        if let Some(offer) = offer {
-            operations.push(SwapOperation::Swap {
-                offer_asset_info: offer,
-                ask_asset_info: part.clone(),
-            });
+            if let Some(coin) = balance {
+                if !coin.amount.is_zero() {
+                    withdraw_msgs.push(BlackWhaleVault(addr).withdraw_msg(denom, coin.amount)?);
+                }
+            }
         }
-        offer = Some(part.clone());
     }
 
-    operations
+    Ok(Response::new().add_messages(withdraw_msgs).add_attribute("action", "erishub/claim_funds"))
+}
+
+/// swaps all unlocked coins to token
+pub fn swap(
+    deps: DepsMut,
+    env: Env,
+    stages: Option<Vec<Vec<(Addr, Denom)>>>,
+) -> StdResult<Response<KujiraMsg>> {
+    let state = State::default();
+
+    validate_no_kuji_swap(&stages)?;
+
+    let fin_multi = if let Some(stages) = stages {
+        let balances = deps.querier.query_all_balances(env.contract.address)?;
+        Some(state.fin_multi.load(deps.storage)?.swap_msg(stages, balances)?)
+    } else {
+        None
+    };
+
+    Ok(Response::new().add_optional_message(fin_multi).add_attribute("action", "erishub/swap"))
+}
+
+fn validate_no_kuji_swap(stages: &Option<Vec<Vec<(Addr, Denom)>>>) -> StdResult<()> {
+    if let Some(stages) = stages {
+        for stage in stages {
+            for (_addr, denom) in stage {
+                if denom.to_string() == CONTRACT_DENOM {
+                    return Err(StdError::generic_err(format!(
+                        "swap from {} is not allowed",
+                        CONTRACT_DENOM,
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// This callback is used to take a current snapshot of the balance and add the received balance to the unlocked_coins state after the execution
+fn check_received_coin_msg(
+    deps: &DepsMut,
+    env: &Env,
+    // offset to account for funds being sent that should be ignored
+    negative_offset: Option<Uint128>,
+) -> StdResult<CosmosMsg<KujiraMsg>> {
+    let mut amount =
+        deps.querier.query_balance(env.contract.address.to_string(), CONTRACT_DENOM)?.amount;
+
+    if let Some(negative_offset) = negative_offset {
+        amount = amount.checked_sub(negative_offset)?;
+    }
+
+    CallbackMsg::CheckReceivedCoin {
+        // 0. take current balance - offset
+        snapshot: Coin {
+            denom: CONTRACT_DENOM.to_string(),
+            amount,
+        },
+    }
+    .into_cosmos_msg(&env.contract.address)
 }
 
 /// NOTE:
@@ -312,28 +348,25 @@ pub fn reinvest(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
         .add_attribute("action", "erishub/reinvest"))
 }
 
-/// NOTE: a `SubMsgExecutionResponse` may contain multiple coin-receiving events, must handle them indivitually
-pub fn register_received_coins(
+pub fn callback_received_coins(
     deps: DepsMut,
     env: Env,
-    mut events: Vec<Event>,
-    event_type: &str,
-    receiver_key: &str,
-    received_coins_key: &str,
+    snapshot: Coin,
 ) -> StdResult<Response<KujiraMsg>> {
-    events.retain(|event| event.ty == event_type);
-    if events.is_empty() {
-        return Ok(Response::new());
-    }
+    // in some cosmwasm versions the events are not received in the callback
+    // so each time the contract can receive some coins from rewards we also need to check after receiving some and add them to the unlocked_coins
 
     let mut received_coins = Coins(vec![]);
-    for event in &events {
-        received_coins.add_many(&parse_coin_receiving_event(
-            &env,
-            event,
-            receiver_key,
-            received_coins_key,
-        )?)?;
+    let mut event = Event::new("erishub/callback_received_coins");
+    let current_balance =
+        deps.querier.query_balance(&env.contract.address, snapshot.denom.to_string())?.amount;
+
+    if current_balance > snapshot.amount {
+        let amount = current_balance.checked_sub(snapshot.amount)?;
+
+        event = event.add_attribute("received_coin", amount.to_string() + snapshot.denom.as_str());
+
+        received_coins.add(&Coin::new(amount.u128(), snapshot.denom))?;
     }
 
     let state = State::default();
@@ -343,38 +376,7 @@ pub fn register_received_coins(
         Ok(coins.0)
     })?;
 
-    Ok(Response::new().add_attribute("action", "erishub/register_received_coins"))
-}
-
-fn parse_coin_receiving_event(
-    env: &Env,
-    event: &Event,
-    receiver_key: &str,
-    received_coins_key: &str,
-) -> StdResult<Coins> {
-    let receiver = &event
-        .attributes
-        .iter()
-        .find(|attr| attr.key == receiver_key)
-        .ok_or_else(|| StdError::generic_err(format!("cannot find `{}` attribute", receiver_key)))?
-        .value;
-
-    let received_coins_str = &event
-        .attributes
-        .iter()
-        .find(|attr| attr.key == received_coins_key)
-        .ok_or_else(|| {
-            StdError::generic_err(format!("cannot find `{}` attribute", received_coins_key))
-        })?
-        .value;
-
-    let received_coins = if *receiver == env.contract.address {
-        Coins::from_str(received_coins_str)?
-    } else {
-        Coins(vec![])
-    };
-
-    Ok(received_coins)
+    Ok(Response::new().add_event(event).add_attribute("action", "erishub/callback_received_coins"))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -476,10 +478,7 @@ pub fn submit_batch(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
         },
     )?;
 
-    let undelegate_submsgs = new_undelegations
-        .iter()
-        .map(|d| SubMsg::reply_on_success(d.to_cosmos_msg(), 2))
-        .collect::<Vec<_>>();
+    let undelegate_msgs = new_undelegations.iter().map(|d| d.to_cosmos_msg()).collect::<Vec<_>>();
 
     // apply burn to the stored total supply and save state
     stake.total_supply = stake.total_supply.checked_sub(pending_batch.ustake_to_burn)?;
@@ -498,8 +497,9 @@ pub fn submit_batch(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
         .add_attribute("ustake_burned", pending_batch.ustake_to_burn);
 
     Ok(Response::new()
-        .add_submessages(undelegate_submsgs)
+        .add_messages(undelegate_msgs)
         .add_message(burn_msg)
+        .add_message(check_received_coin_msg(&deps, &env, None)?)
         .add_event(event)
         .add_attribute("action", "erishub/unbond"))
 }
@@ -657,17 +657,15 @@ pub fn rebalance(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
 
     let new_redelegations = compute_redelegations_for_rebalancing(&delegations);
 
-    let redelegate_submsgs = new_redelegations
-        .iter()
-        .map(|rd| SubMsg::reply_on_success(rd.to_cosmos_msg(), 2))
-        .collect::<Vec<_>>();
+    let redelegate_msgs = new_redelegations.iter().map(|rd| rd.to_cosmos_msg()).collect::<Vec<_>>();
 
     let amount: u128 = new_redelegations.iter().map(|rd| rd.amount).sum();
 
     let event = Event::new("erishub/rebalanced").add_attribute("utoken_moved", amount.to_string());
 
     Ok(Response::new()
-        .add_submessages(redelegate_submsgs)
+        .add_messages(redelegate_msgs)
+        .add_message(check_received_coin_msg(&deps, &env, None)?)
         .add_event(event)
         .add_attribute("action", "erishub/rebalance"))
 }
@@ -717,15 +715,13 @@ pub fn remove_validator(
     let delegation_to_remove = query_delegation(&deps.querier, &validator, &env.contract.address)?;
     let new_redelegations = compute_redelegations_for_removal(&delegation_to_remove, &delegations);
 
-    let redelegate_submsgs = new_redelegations
-        .iter()
-        .map(|d| SubMsg::reply_on_success(d.to_cosmos_msg(), 2))
-        .collect::<Vec<_>>();
+    let redelegate_msgs = new_redelegations.iter().map(|d| d.to_cosmos_msg()).collect::<Vec<_>>();
 
     let event = Event::new("erishub/validator_removed").add_attribute("validator", validator);
 
     Ok(Response::new()
-        .add_submessages(redelegate_submsgs)
+        .add_messages(redelegate_msgs)
+        .add_message(check_received_coin_msg(&deps, &env, None)?)
         .add_event(event)
         .add_attribute("action", "erishub/remove_validator"))
 }
@@ -768,48 +764,26 @@ pub fn update_config(
     sender: Addr,
     protocol_fee_contract: Option<String>,
     protocol_reward_fee: Option<Decimal>,
-    add_to_swap_config: Option<Vec<SwapPath>>,
-    swap_config: Option<SwapConfig>,
 ) -> StdResult<Response<KujiraMsg>> {
     let state = State::default();
 
     state.assert_owner(deps.storage, &sender)?;
 
-    let mut fee_config = state.fee_config.load(deps.storage)?;
+    if protocol_fee_contract.is_some() || protocol_reward_fee.is_some() {
+        let mut fee_config = state.fee_config.load(deps.storage)?;
 
-    if let Some(protocol_fee_contract) = protocol_fee_contract {
-        fee_config.protocol_fee_contract = deps.api.addr_validate(&protocol_fee_contract)?;
-    }
-
-    if let Some(protocol_reward_fee) = protocol_reward_fee {
-        if protocol_reward_fee.gt(&get_reward_fee_cap()) {
-            return Err(StdError::generic_err("'protocol_reward_fee' greater than max"));
+        if let Some(protocol_fee_contract) = protocol_fee_contract {
+            fee_config.protocol_fee_contract = deps.api.addr_validate(&protocol_fee_contract)?;
         }
-        fee_config.protocol_reward_fee = protocol_reward_fee;
-    }
 
-    state.fee_config.save(deps.storage, &fee_config)?;
-
-    if add_to_swap_config.is_some() && swap_config.is_some() {
-        return Err(StdError::generic_err("only set 'add_to_swap_config' or 'swap_config'"));
-    }
-
-    if let Some(swap_config) = swap_config {
-        addr_validate_to_lower(deps.api, swap_config.router_contract.as_str())?;
-        validate_swap_paths(&swap_config.allowed_paths)?;
-        state.swap_config.save(deps.storage, &swap_config)?;
-    }
-
-    if let Some(add_to_swap_config) = add_to_swap_config {
-        state.swap_config.update(deps.storage, |mut config| -> StdResult<_> {
-            for path in add_to_swap_config {
-                config.allowed_paths.push(path);
+        if let Some(protocol_reward_fee) = protocol_reward_fee {
+            if protocol_reward_fee.gt(&get_reward_fee_cap()) {
+                return Err(StdError::generic_err("'protocol_reward_fee' greater than max"));
             }
+            fee_config.protocol_reward_fee = protocol_reward_fee;
+        }
 
-            validate_swap_paths(&config.allowed_paths)?;
-
-            Ok(config)
-        })?;
+        state.fee_config.save(deps.storage, &fee_config)?;
     }
 
     Ok(Response::new().add_attribute("action", "erishub/update_config"))

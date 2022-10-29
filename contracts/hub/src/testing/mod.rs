@@ -1,3 +1,4 @@
 mod custom_querier;
 mod helpers;
-mod tests;
+pub mod test_swap;
+mod tests_default;

@@ -1,12 +1,43 @@
 // pub mod asset;
+pub mod adapters;
 pub mod hub;
 pub mod querier;
-pub mod router;
 
-mod decimal_checked_ops {
-    use cosmwasm_std::{Decimal, Decimal256, Fraction, OverflowError, StdError, Uint128, Uint256};
+mod extensions {
+    use cosmwasm_std::{
+        CosmosMsg, Decimal, Decimal256, Env, Fraction, OverflowError, Response, StdError,
+        StdResult, Uint128, Uint256,
+    };
+    use kujira::msg::KujiraMsg;
     use std::{convert::TryInto, str::FromStr};
 
+    use crate::hub::CallbackMsg;
+
+    pub trait CustomResponse<T>: Sized {
+        fn add_optional_message(self, msg: Option<CosmosMsg<T>>) -> Self;
+        fn add_callback(self, env: &Env, msg: CallbackMsg) -> StdResult<Self>;
+        fn add_optional_callback(self, env: &Env, msg: Option<CallbackMsg>) -> StdResult<Self>;
+    }
+
+    impl CustomResponse<KujiraMsg> for Response<KujiraMsg> {
+        fn add_optional_message(self, msg: Option<CosmosMsg<KujiraMsg>>) -> Self {
+            match msg {
+                Some(msg) => self.add_message(msg),
+                None => self,
+            }
+        }
+
+        fn add_callback(self, env: &Env, msg: CallbackMsg) -> StdResult<Self> {
+            Ok(self.add_message(msg.into_cosmos_msg(&env.contract.address)?))
+        }
+
+        fn add_optional_callback(self, env: &Env, msg: Option<CallbackMsg>) -> StdResult<Self> {
+            match msg {
+                Some(msg) => self.add_callback(env, msg),
+                None => Ok(self),
+            }
+        }
+    }
     pub trait DecimalCheckedOps {
         fn checked_add(self, other: Decimal) -> Result<Decimal, StdError>;
         fn checked_mul_uint(self, other: Uint128) -> Result<Uint128, StdError>;
@@ -44,4 +75,5 @@ mod decimal_checked_ops {
     }
 }
 
-pub use decimal_checked_ops::DecimalCheckedOps;
+pub use extensions::CustomResponse;
+pub use extensions::DecimalCheckedOps;
