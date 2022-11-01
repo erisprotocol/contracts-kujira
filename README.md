@@ -8,10 +8,11 @@ A previous version ([v1.0.0-rc0](https://github.com/st4k3h0us3/steak-contracts/r
 
 ## Contracts
 
-| Contract                               | Description                                                   |
-| -------------------------------------- | ------------------------------------------------------------- |
-| [`erist-staking-hub`](./contracts/hub) | Manages minting/burning of ampKUJI token and bonded Kuji      |
-| [`erist-router`](./contracts/hub)      | Contract for swapping any coin through multiple hops with FIN |
+| Contract                               | Description                                              |
+| -------------------------------------- | -------------------------------------------------------- |
+| [`erist-staking-hub`](./contracts/hub) | Manages minting/burning of ampKUJI token and bonded Kuji |
+
+For the routing of the swap the fin-multi router is used. See <https://github.com/Team-Kujira/fin-multi>
 
 ## Building
 
@@ -19,8 +20,14 @@ For interacting with the smart contract clone <https://github.com/erisprotocol/l
 
 ## Changelog
 
-### Hub Version 1.1.0
+### Hub Version 1.2.1
+
+Allows splitting Black Whale vault tokens
+Allows auto compounding any token received through staking
+Will not allow to swap from KUJI or ampKUJI
 
 ## License
+
+This repository is a fork of <https://github.com/steak-enjoyers/steak>
 
 Contents of this repository are open source under [GNU General Public License v3](./LICENSE) or later.
