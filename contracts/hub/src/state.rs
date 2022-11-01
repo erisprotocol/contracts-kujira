@@ -5,6 +5,7 @@ use eris::{
     adapters::fin_multi::FinMulti,
     hub::{Batch, FeeConfig, PendingBatch, StakeToken, UnbondRequest},
 };
+use kujira::denom::Denom;
 
 use crate::types::BooleanKey;
 
@@ -13,6 +14,10 @@ pub(crate) struct State<'a> {
     pub fin_multi: Item<'a, FinMulti>,
     /// Account who can call certain privileged functions
     pub owner: Item<'a, Addr>,
+    /// Account who can call harvest
+    pub operator: Item<'a, Addr>,
+    /// Stages that must be used by permissionless users
+    pub stages_preset: Item<'a, Vec<Vec<(Addr, Denom)>>>,
     /// Pending ownership transfer, awaiting acceptance by the new owner
     pub new_owner: Item<'a, Addr>,
     /// Denom and supply of the Liquid Staking token
@@ -55,6 +60,8 @@ impl Default for State<'static> {
             fin_multi: Item::new("fin_multi"),
             owner: Item::new("owner"),
             new_owner: Item::new("new_owner"),
+            operator: Item::new("operator"),
+            stages_preset: Item::new("stages_preset"),
             stake_token: Item::new("stake_token"),
             epoch_period: Item::new("epoch_period"),
             unbond_period: Item::new("unbond_period"),
@@ -75,6 +82,15 @@ impl<'a> State<'a> {
             Ok(())
         } else {
             Err(StdError::generic_err("unauthorized: sender is not owner"))
+        }
+    }
+
+    pub fn assert_operator(&self, storage: &dyn Storage, sender: &Addr) -> StdResult<()> {
+        let operator = self.operator.load(storage)?;
+        if *sender == operator {
+            Ok(())
+        } else {
+            Err(StdError::generic_err("unauthorized: sender is not operator"))
         }
     }
 }

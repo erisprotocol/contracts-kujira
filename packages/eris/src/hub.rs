@@ -10,6 +10,12 @@ pub struct InstantiateMsg {
     pub fin_multi_contract: String,
     /// Account who can call certain privileged functions
     pub owner: String,
+
+    /// Account who can call harvest
+    pub operator: String,
+    /// Stages that should be used in the permissionless harvest function
+    pub stages_preset: Option<Vec<Vec<(Addr, Denom)>>>,
+
     /// Name of the liquid staking token
     pub denom: String,
     /// How often the unbonding queue is to be executed, in seconds
@@ -72,6 +78,10 @@ pub enum ExecuteMsg {
         protocol_fee_contract: Option<String>,
         /// Fees that are being applied during reinvest of staking rewards
         protocol_reward_fee: Option<Decimal>, // "1 is 100%, 0.05 is 5%"
+        /// Sets a new operator
+        operator: Option<String>,
+        /// Sets the stages preset
+        stages_preset: Option<Vec<Vec<(Addr, Denom)>>>,
     },
 
     /// Submit an unbonding request to the current unbonding queue; automatically invokes `unbond`
@@ -89,6 +99,7 @@ pub enum CallbackMsg {
     },
     /// Swap remaining tokens held by the contract to Token
     Swap {
+        sender: Addr,
         stages: Option<Vec<Vec<(Addr, Denom)>>>,
     },
     /// Following the swaps, stake the Token acquired to the whitelisted validators

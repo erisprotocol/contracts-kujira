@@ -50,6 +50,8 @@ fn setup_test() -> OwnedDeps<MockStorage, MockApi, CustomQuerier> {
             validators: vec!["alice".to_string(), "bob".to_string(), "charlie".to_string()],
             protocol_fee_contract: "fee".to_string(),
             protocol_reward_fee: Decimal::from_ratio(1u128, 100u128),
+            operator: "operator".to_string(),
+            stages_preset: None,
         },
     )
     .unwrap();
@@ -1347,6 +1349,8 @@ fn update_fee() {
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract: None,
             protocol_reward_fee: Some(Decimal::from_ratio(11u128, 100u128)),
+            operator: None,
+            stages_preset: None,
         },
     )
     .unwrap_err();
@@ -1359,6 +1363,8 @@ fn update_fee() {
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract: None,
             protocol_reward_fee: Some(Decimal::from_ratio(11u128, 100u128)),
+            operator: None,
+            stages_preset: None,
         },
     )
     .unwrap_err();
@@ -1371,6 +1377,8 @@ fn update_fee() {
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract: Some("fee-new".to_string()),
             protocol_reward_fee: Some(Decimal::from_ratio(10u128, 100u128)),
+            operator: None,
+            stages_preset: None,
         },
     )
     .unwrap();

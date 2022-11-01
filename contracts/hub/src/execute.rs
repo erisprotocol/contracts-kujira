@@ -15,7 +15,9 @@ use kujira::denom::Denom;
 use kujira::msg::{DenomMsg, KujiraMsg};
 
 use crate::constants::{get_reward_fee_cap, CONTRACT_DENOM};
-use crate::helpers::{dedupe_check_received_addrs, query_delegation, query_delegations};
+use crate::helpers::{
+    addr_validate_to_lower, dedupe_check_received_addrs, query_delegation, query_delegations,
+};
 use crate::math::{
     compute_mint_amount, compute_redelegations_for_rebalancing, compute_redelegations_for_removal,
     compute_unbond_amount, compute_undelegations, mark_reconciled_batches, reconcile_batches,
@@ -40,6 +42,7 @@ pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> StdResult<Re
     }
 
     state.owner.save(deps.storage, &deps.api.addr_validate(&msg.owner)?)?;
+    state.operator.save(deps.storage, &deps.api.addr_validate(&msg.operator)?)?;
     state.epoch_period.save(deps.storage, &msg.epoch_period)?;
     state.unbond_period.save(deps.storage, &msg.unbond_period)?;
 
@@ -79,6 +82,10 @@ pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> StdResult<Re
             total_supply: Uint128::zero(),
         },
     )?;
+
+    // needs to be validated after stake token has been set
+    validate_no_kuji_or_ampkuji_swap(&msg.stages_preset, &state, deps.storage)?;
+    state.stages_preset.save(deps.storage, &msg.stages_preset.unwrap_or_default())?;
 
     Ok(Response::new().add_message(DenomMsg::Create {
         subdenom: msg.denom.into(),
@@ -170,6 +177,7 @@ pub fn harvest(
     env: Env,
     withdrawals: Option<Vec<(Addr, Denom)>>,
     stages: Option<Vec<Vec<(Addr, Denom)>>>,
+    sender: Addr,
 ) -> StdResult<Response<KujiraMsg>> {
     let state = State::default();
 
@@ -192,6 +200,7 @@ pub fn harvest(
 
     let swap_msg = stages.map(|s| CallbackMsg::Swap {
         stages: Some(s),
+        sender,
     });
 
     Ok(Response::new()
@@ -240,9 +249,16 @@ pub fn claim_funds(
 pub fn swap(
     deps: DepsMut,
     env: Env,
-    stages: Option<Vec<Vec<(Addr, Denom)>>>,
+    mut stages: Option<Vec<Vec<(Addr, Denom)>>>,
+    sender: Addr,
 ) -> StdResult<Response<KujiraMsg>> {
     let state = State::default();
+
+    if stages.is_some() {
+        state.assert_operator(deps.storage, &sender)?
+    } else {
+        stages = Some(state.stages_preset.load(deps.storage)?);
+    }
 
     validate_no_kuji_or_ampkuji_swap(&stages, &state, deps.storage)?;
 
@@ -694,8 +710,9 @@ pub fn withdraw_unbonded(
 // Ownership and management logics
 //--------------------------------------------------------------------------------------------------
 
-pub fn rebalance(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
+pub fn rebalance(deps: DepsMut, env: Env, sender: Addr) -> StdResult<Response<KujiraMsg>> {
     let state = State::default();
+    state.assert_owner(deps.storage, &sender)?;
     let validators = state.validators.load(deps.storage)?;
 
     let delegations = query_delegations(&deps.querier, &validators, &env.contract.address)?;
@@ -820,6 +837,8 @@ pub fn update_config(
     sender: Addr,
     protocol_fee_contract: Option<String>,
     protocol_reward_fee: Option<Decimal>,
+    operator: Option<String>,
+    stages_preset: Option<Vec<Vec<(Addr, Denom)>>>,
 ) -> StdResult<Response<KujiraMsg>> {
     let state = State::default();
 
@@ -840,6 +859,18 @@ pub fn update_config(
         }
 
         state.fee_config.save(deps.storage, &fee_config)?;
+    }
+
+    if let Some(operator) = operator {
+        state.operator.save(deps.storage, &addr_validate_to_lower(deps.api, operator.as_str())?)?;
+    }
+
+    if stages_preset.is_some() {
+        validate_no_kuji_or_ampkuji_swap(&stages_preset, &state, deps.storage)?;
+    }
+
+    if let Some(stages_preset) = stages_preset {
+        state.stages_preset.save(deps.storage, &stages_preset)?;
     }
 
     Ok(Response::new().add_attribute("action", "erishub/update_config"))

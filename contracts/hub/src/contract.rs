@@ -67,15 +67,24 @@ pub fn execute(
         ExecuteMsg::Harvest {
             withdrawals,
             stages,
-        } => execute::harvest(deps, env, withdrawals, stages),
-        ExecuteMsg::Rebalance {} => execute::rebalance(deps, env),
+        } => execute::harvest(deps, env, withdrawals, stages, info.sender),
+        ExecuteMsg::Rebalance {} => execute::rebalance(deps, env, info.sender),
         ExecuteMsg::Reconcile {} => execute::reconcile(deps, env),
         ExecuteMsg::SubmitBatch {} => execute::submit_batch(deps, env),
         ExecuteMsg::Callback(callback_msg) => callback(deps, env, info, callback_msg),
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract,
             protocol_reward_fee,
-        } => execute::update_config(deps, info.sender, protocol_fee_contract, protocol_reward_fee),
+            operator,
+            stages_preset,
+        } => execute::update_config(
+            deps,
+            info.sender,
+            protocol_fee_contract,
+            protocol_reward_fee,
+            operator,
+            stages_preset,
+        ),
         ExecuteMsg::QueueUnbond {
             receiver,
         } => {
@@ -119,8 +128,9 @@ fn callback(
             withdrawals,
         } => execute::claim_funds(deps, env, withdrawals),
         CallbackMsg::Swap {
+            sender,
             stages,
-        } => execute::swap(deps, env, stages),
+        } => execute::swap(deps, env, stages, sender),
         CallbackMsg::CheckReceivedCoin {
             snapshot,
             snapshot_stake,

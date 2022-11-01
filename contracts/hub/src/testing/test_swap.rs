@@ -46,6 +46,8 @@ fn setup_test() -> OwnedDeps<MockStorage, MockApi, CustomQuerier> {
             validators: vec!["alice".to_string(), "bob".to_string(), "charlie".to_string()],
             protocol_fee_contract: "fee".to_string(),
             protocol_reward_fee: Decimal::from_ratio(1u128, 100u128),
+            operator: "operator".to_string(),
+            stages_preset: Some(vec![vec![(Addr::unchecked("fin1"), "test".into())]]),
         },
     )
     .unwrap();
@@ -172,6 +174,7 @@ fn harvesting_with_options() {
             contract_addr: MOCK_CONTRACT_ADDR.to_string(),
             msg: to_binary(&ExecuteMsg::Callback(CallbackMsg::Swap {
                 stages: Some(vec![vec![(Addr::unchecked("fin1"), "test".into())]]),
+                sender: Addr::unchecked("worker")
             }))
             .unwrap(),
             funds: vec![]
@@ -252,6 +255,7 @@ fn swap() -> StdResult<()> {
         mock_info("worker", &[]),
         ExecuteMsg::Callback(CallbackMsg::Swap {
             stages: Some(vec![vec![(Addr::unchecked("fin1"), "test".into())]]),
+            sender: Addr::unchecked("worker"),
         }),
     )
     .unwrap_err();
@@ -263,6 +267,19 @@ fn swap() -> StdResult<()> {
         mock_info(MOCK_CONTRACT_ADDR, &[]),
         ExecuteMsg::Callback(CallbackMsg::Swap {
             stages: Some(vec![vec![(Addr::unchecked("fin1"), CONTRACT_DENOM.into())]]),
+            sender: Addr::unchecked("worker"),
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(err, StdError::generic_err("unauthorized: sender is not operator"));
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(MOCK_CONTRACT_ADDR, &[]),
+        ExecuteMsg::Callback(CallbackMsg::Swap {
+            stages: Some(vec![vec![(Addr::unchecked("fin1"), CONTRACT_DENOM.into())]]),
+            sender: Addr::unchecked("operator"),
         }),
     )
     .unwrap_err();
@@ -274,6 +291,7 @@ fn swap() -> StdResult<()> {
         mock_info(MOCK_CONTRACT_ADDR, &[]),
         ExecuteMsg::Callback(CallbackMsg::Swap {
             stages: Some(vec![vec![(Addr::unchecked("fin2"), STAKE_DENOM.into())]]),
+            sender: Addr::unchecked("operator"),
         }),
     )
     .unwrap_err();
@@ -297,12 +315,12 @@ fn swap() -> StdResult<()> {
         mock_info(MOCK_CONTRACT_ADDR, &[]),
         ExecuteMsg::Callback(CallbackMsg::Swap {
             stages: Some(stages.clone()),
+            sender: Addr::unchecked("operator"),
         }),
     )
     .unwrap();
 
     assert_eq!(res.messages.len(), 1);
-
     assert_eq!(
         res.messages[0],
         SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
@@ -310,6 +328,32 @@ fn swap() -> StdResult<()> {
             funds: vec![coin(100, "test"), coin(200, "abc")],
             msg: to_binary(&FinMultiExecuteMsg {
                 stages,
+                recipient: None,
+            })?,
+        }))
+    );
+
+    // SWAP WITHOUT STAGES USES DEFAULT
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(MOCK_CONTRACT_ADDR, &[]),
+        ExecuteMsg::Callback(CallbackMsg::Swap {
+            stages: None,
+            sender: Addr::unchecked("anyone"),
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(res.messages.len(), 1);
+    assert_eq!(
+        res.messages[0],
+        SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: "fin_multi".to_string(),
+            funds: vec![coin(100, "test")],
+            msg: to_binary(&FinMultiExecuteMsg {
+                stages: vec![vec![(Addr::unchecked("fin1"), "test".into())]],
                 recipient: None,
             })?,
         }))
