@@ -178,7 +178,7 @@ fn harvesting_with_options() {
         }))
     );
 
-    assert_eq!(res.messages[5], check_received_coin(0));
+    assert_eq!(res.messages[5], check_received_coin(0, 0));
 
     assert_eq!(
         res.messages[6],
@@ -267,6 +267,17 @@ fn swap() -> StdResult<()> {
     )
     .unwrap_err();
     assert_eq!(err, StdError::generic_err(format!("swap from {} is not allowed", CONTRACT_DENOM)));
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(MOCK_CONTRACT_ADDR, &[]),
+        ExecuteMsg::Callback(CallbackMsg::Swap {
+            stages: Some(vec![vec![(Addr::unchecked("fin2"), STAKE_DENOM.into())]]),
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(err, StdError::generic_err(format!("swap from {} is not allowed", STAKE_DENOM)));
 
     deps.querier.set_bank_balances(&[
         coin(100, "test"),

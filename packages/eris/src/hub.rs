@@ -96,6 +96,7 @@ pub enum CallbackMsg {
 
     CheckReceivedCoin {
         snapshot: Coin,
+        snapshot_stake: Coin,
     },
 }
 

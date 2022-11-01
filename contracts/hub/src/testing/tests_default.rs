@@ -4,7 +4,7 @@ use std::str::FromStr;
 use cosmwasm_std::testing::{mock_env, mock_info, MockApi, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
     coin, to_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, DistributionMsg, Event, Order,
-    OwnedDeps, StdError, SubMsg, Uint128, WasmMsg,
+    OwnedDeps, StdError, StdResult, SubMsg, Uint128, WasmMsg,
 };
 use eris::DecimalCheckedOps;
 
@@ -144,7 +144,7 @@ fn bonding() {
         })))
     );
 
-    assert_eq!(res.messages[2], check_received_coin(100));
+    assert_eq!(res.messages[2], check_received_coin(100, 0));
     deps.querier.set_bank_balances(&[coin(12345 + 222, CONTRACT_DENOM)]);
 
     assert_eq!(
@@ -186,7 +186,7 @@ fn bonding() {
             recipient: Addr::unchecked("user_3")
         })))
     );
-    assert_eq!(res.messages[2], check_received_coin(222));
+    assert_eq!(res.messages[2], check_received_coin(222, 0));
 
     // Check the state after bonding
     deps.querier.set_staking_delegations(&[
@@ -239,7 +239,7 @@ fn donating() {
         })))
     );
 
-    assert_eq!(res.messages[2], check_received_coin(100));
+    assert_eq!(res.messages[2], check_received_coin(100, 0));
     deps.querier.set_bank_balances(&[coin(100, CONTRACT_DENOM)]);
 
     // Bond when there are existing delegations, and Token:Stake exchange rate is >1
@@ -277,7 +277,7 @@ fn donating() {
 
     assert_eq!(res.messages.len(), 2);
     assert_eq!(res.messages[0], SubMsg::new(Delegation::new("charlie", 12345).to_cosmos_msg()));
-    assert_eq!(res.messages[1], check_received_coin(100));
+    assert_eq!(res.messages[1], check_received_coin(100, 0));
 
     deps.querier.set_bank_balances(&[coin(100, CONTRACT_DENOM)]);
     // Check the state after bonding
@@ -346,7 +346,7 @@ fn harvesting() {
         }))
     );
 
-    assert_eq!(res.messages[3], check_received_coin(0));
+    assert_eq!(res.messages[3], check_received_coin(0, 0));
 
     assert_eq!(
         res.messages[4],
@@ -369,6 +369,7 @@ fn registering_unlocked_coins() {
         mock_info(MOCK_CONTRACT_ADDR, &[]),
         ExecuteMsg::Callback(CallbackMsg::CheckReceivedCoin {
             snapshot: coin(100, CONTRACT_DENOM),
+            snapshot_stake: coin(0, STAKE_DENOM),
         }),
     )
     .unwrap();
@@ -377,9 +378,64 @@ fn registering_unlocked_coins() {
         vec![Event::new("erishub/callback_received_coins")
             .add_attribute("received_coin", 123.to_string() + CONTRACT_DENOM)]
     );
+    assert_eq!(res.messages.len(), 0);
     // Unlocked coins in contract state should have been updated
     let unlocked_coins = state.unlocked_coins.load(deps.as_ref().storage).unwrap();
     assert_eq!(unlocked_coins, vec![Coin::new(123, CONTRACT_DENOM),]);
+}
+
+#[test]
+fn registering_unlocked_stake_coins() -> StdResult<()> {
+    let mut deps = setup_test();
+    let state = State::default();
+
+    state.stake_token.save(
+        deps.as_mut().storage,
+        &StakeToken {
+            denom: STAKE_DENOM.to_string(),
+            total_supply: Uint128::new(1000),
+        },
+    )?;
+
+    deps.querier.set_bank_balances(&[coin(100 + 123, CONTRACT_DENOM), coin(100, STAKE_DENOM)]);
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(MOCK_CONTRACT_ADDR, &[]),
+        ExecuteMsg::Callback(CallbackMsg::CheckReceivedCoin {
+            snapshot: coin(100, CONTRACT_DENOM),
+            snapshot_stake: coin(0, STAKE_DENOM),
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        res.events,
+        vec![Event::new("erishub/callback_received_coins")
+            .add_attribute("received_coin", 123.to_string() + CONTRACT_DENOM)]
+    );
+
+    assert_eq!(res.messages.len(), 1);
+
+    assert_eq!(
+        res.messages[0],
+        SubMsg::new(KujiraMsg::Denom(DenomMsg::Burn {
+            denom: STAKE_DENOM.into(),
+            amount: Uint128::new(100)
+        }))
+    );
+
+    assert_eq!(
+        state.stake_token.load(deps.as_ref().storage)?,
+        StakeToken {
+            denom: STAKE_DENOM.to_string(),
+            total_supply: Uint128::new(900),
+        }
+    );
+
+    // Unlocked coins in contract state should have been updated
+    let unlocked_coins = state.unlocked_coins.load(deps.as_ref().storage).unwrap();
+    assert_eq!(unlocked_coins, vec![Coin::new(123, CONTRACT_DENOM),]);
+    Ok(())
 }
 
 #[test]
@@ -621,7 +677,7 @@ fn submitting_batch() {
             amount: Uint128::new(92876)
         })))
     );
-    assert_eq!(res.messages[4], check_received_coin(0));
+    assert_eq!(res.messages[4], check_received_coin(0, 0));
 
     // A new pending batch should have been created
     let pending_batch = state.pending_batch.load(deps.as_ref().storage).unwrap();
@@ -1208,7 +1264,7 @@ fn removing_validator() {
         res.messages[1],
         SubMsg::new(Redelegation::new("charlie", "bob", 170833).to_cosmos_msg()),
     );
-    assert_eq!(res.messages[2], check_received_coin(0));
+    assert_eq!(res.messages[2], check_received_coin(0, 0));
 
     let validators = state.validators.load(deps.as_ref().storage).unwrap();
     assert_eq!(validators, vec![String::from("alice"), String::from("bob")],);

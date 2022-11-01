@@ -73,11 +73,12 @@ pub(super) fn set_total_stake_supply(
         .unwrap();
 }
 
-pub fn check_received_coin(amount: u128) -> SubMsg<KujiraMsg> {
+pub fn check_received_coin(amount: u128, amount_stake: u128) -> SubMsg<KujiraMsg> {
     SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
         contract_addr: MOCK_CONTRACT_ADDR.to_string(),
         msg: to_binary(&ExecuteMsg::Callback(CallbackMsg::CheckReceivedCoin {
             snapshot: coin(amount, CONTRACT_DENOM),
+            snapshot_stake: coin(amount_stake, "factory/cosmos2contract/stake"),
         }))
         .unwrap(),
         funds: vec![],

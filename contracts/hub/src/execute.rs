@@ -1,6 +1,6 @@
 use cosmwasm_std::{
     to_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, DepsMut, DistributionMsg, Env, Event,
-    Order, Response, StdError, StdResult, Uint128, WasmMsg,
+    Order, Response, StdError, StdResult, Storage, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 use eris::{CustomResponse, DecimalCheckedOps};
@@ -149,7 +149,7 @@ pub fn bond(
 
         Some(
             DenomMsg::Mint {
-                denom: stake.denom.into(),
+                denom: stake.denom.clone().into(),
                 amount: ustake_to_mint,
                 recipient: receiver,
             }
@@ -160,7 +160,7 @@ pub fn bond(
     Ok(Response::new()
         .add_message(new_delegation.to_cosmos_msg())
         .add_optional_message(mint_msg)
-        .add_message(check_received_coin_msg(&deps, &env, Some(token_to_bond))?)
+        .add_message(check_received_coin_msg(&deps, &env, stake, Some(token_to_bond))?)
         .add_event(event)
         .add_attribute("action", "erishub/bond"))
 }
@@ -171,6 +171,8 @@ pub fn harvest(
     withdrawals: Option<Vec<(Addr, Denom)>>,
     stages: Option<Vec<Vec<(Addr, Denom)>>>,
 ) -> StdResult<Response<KujiraMsg>> {
+    let state = State::default();
+
     // 1. withdraw delegation rewards
     let withdraw_submsgs: Vec<CosmosMsg<KujiraMsg>> = deps
         .querier
@@ -200,7 +202,12 @@ pub fn harvest(
         // 3. swap
         .add_optional_callback(&env, swap_msg)?
         // 4. apply received total ukuji to unlocked_coins
-        .add_message(check_received_coin_msg(&deps, &env, None)?)
+        .add_message(check_received_coin_msg(
+            &deps,
+            &env,
+            state.stake_token.load(deps.storage)?,
+            None,
+        )?)
         // 5. restake unlocked_coins
         .add_callback(&env, CallbackMsg::Reinvest {})?
         .add_attribute("action", "erishub/harvest"))
@@ -237,7 +244,7 @@ pub fn swap(
 ) -> StdResult<Response<KujiraMsg>> {
     let state = State::default();
 
-    validate_no_kuji_swap(&stages)?;
+    validate_no_kuji_or_ampkuji_swap(&stages, &state, deps.storage)?;
 
     let fin_multi = if let Some(stages) = stages {
         let balances = deps.querier.query_all_balances(env.contract.address)?;
@@ -249,14 +256,20 @@ pub fn swap(
     Ok(Response::new().add_optional_message(fin_multi).add_attribute("action", "erishub/swap"))
 }
 
-fn validate_no_kuji_swap(stages: &Option<Vec<Vec<(Addr, Denom)>>>) -> StdResult<()> {
+fn validate_no_kuji_or_ampkuji_swap(
+    stages: &Option<Vec<Vec<(Addr, Denom)>>>,
+    state: &State,
+    storage: &dyn Storage,
+) -> StdResult<()> {
     if let Some(stages) = stages {
+        let stake_token_denom = state.stake_token.load(storage)?.denom;
+
         for stage in stages {
             for (_addr, denom) in stage {
-                if denom.to_string() == CONTRACT_DENOM {
+                if denom.to_string() == CONTRACT_DENOM || denom.to_string() == stake_token_denom {
                     return Err(StdError::generic_err(format!(
                         "swap from {} is not allowed",
-                        CONTRACT_DENOM,
+                        denom,
                     )));
                 }
             }
@@ -269,6 +282,7 @@ fn validate_no_kuji_swap(stages: &Option<Vec<Vec<(Addr, Denom)>>>) -> StdResult<
 fn check_received_coin_msg(
     deps: &DepsMut,
     env: &Env,
+    stake: StakeToken,
     // offset to account for funds being sent that should be ignored
     negative_offset: Option<Uint128>,
 ) -> StdResult<CosmosMsg<KujiraMsg>> {
@@ -279,11 +293,18 @@ fn check_received_coin_msg(
         amount = amount.checked_sub(negative_offset)?;
     }
 
+    let amount_stake =
+        deps.querier.query_balance(env.contract.address.to_string(), stake.denom.clone())?.amount;
+
     CallbackMsg::CheckReceivedCoin {
         // 0. take current balance - offset
         snapshot: Coin {
             denom: CONTRACT_DENOM.to_string(),
             amount,
+        },
+        snapshot_stake: Coin {
+            denom: stake.denom,
+            amount: amount_stake,
         },
     }
     .into_cosmos_msg(&env.contract.address)
@@ -350,6 +371,7 @@ pub fn callback_received_coins(
     deps: DepsMut,
     env: Env,
     snapshot: Coin,
+    snapshot_stake: Coin,
 ) -> StdResult<Response<KujiraMsg>> {
     // in some cosmwasm versions the events are not received in the callback
     // so each time the contract can receive some coins from rewards we also need to check after receiving some and add them to the unlocked_coins
@@ -374,7 +396,32 @@ pub fn callback_received_coins(
         Ok(coins.0)
     })?;
 
-    Ok(Response::new().add_event(event).add_attribute("action", "erishub/callback_received_coins"))
+    let current_balance_stake =
+        deps.querier.query_balance(&env.contract.address, snapshot_stake.denom.to_string())?.amount;
+
+    let mut burn_msg: Option<CosmosMsg<KujiraMsg>> = None;
+    if current_balance_stake > snapshot_stake.amount {
+        // if we have received ampKuji as staking rewards we burn it and increase exchange rate by it.
+        let ustake_to_burn = current_balance_stake.checked_sub(snapshot_stake.amount)?;
+
+        state.stake_token.update(deps.storage, |mut stake| -> StdResult<_> {
+            stake.total_supply = stake.total_supply.checked_sub(ustake_to_burn)?;
+            Ok(stake)
+        })?;
+
+        burn_msg = Some(
+            DenomMsg::Burn {
+                denom: snapshot_stake.denom.into(),
+                amount: ustake_to_burn,
+            }
+            .into(),
+        );
+    }
+
+    Ok(Response::new()
+        .add_optional_message(burn_msg)
+        .add_event(event)
+        .add_attribute("action", "erishub/callback_received_coins"))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -497,7 +544,7 @@ pub fn submit_batch(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
     Ok(Response::new()
         .add_messages(undelegate_msgs)
         .add_message(burn_msg)
-        .add_message(check_received_coin_msg(&deps, &env, None)?)
+        .add_message(check_received_coin_msg(&deps, &env, stake, None)?)
         .add_event(event)
         .add_attribute("action", "erishub/unbond"))
 }
@@ -663,7 +710,12 @@ pub fn rebalance(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
 
     Ok(Response::new()
         .add_messages(redelegate_msgs)
-        .add_message(check_received_coin_msg(&deps, &env, None)?)
+        .add_message(check_received_coin_msg(
+            &deps,
+            &env,
+            state.stake_token.load(deps.storage)?,
+            None,
+        )?)
         .add_event(event)
         .add_attribute("action", "erishub/rebalance"))
 }
@@ -720,7 +772,12 @@ pub fn remove_validator(
 
     Ok(Response::new()
         .add_messages(redelegate_msgs)
-        .add_message(check_received_coin_msg(&deps, &env, None)?)
+        .add_message(check_received_coin_msg(
+            &deps,
+            &env,
+            state.stake_token.load(deps.storage)?,
+            None,
+        )?)
         .add_event(event)
         .add_attribute("action", "erishub/remove_validator"))
 }

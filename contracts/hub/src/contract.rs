@@ -123,7 +123,8 @@ fn callback(
         } => execute::swap(deps, env, stages),
         CallbackMsg::CheckReceivedCoin {
             snapshot,
-        } => execute::callback_received_coins(deps, env, snapshot),
+            snapshot_stake,
+        } => execute::callback_received_coins(deps, env, snapshot, snapshot_stake),
     }
 }
 
