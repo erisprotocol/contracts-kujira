@@ -18,12 +18,14 @@ pub fn config(deps: Deps) -> StdResult<ConfigResponse> {
 
     Ok(ConfigResponse {
         owner: state.owner.load(deps.storage)?.into(),
+        operator: state.operator.load(deps.storage)?.into(),
         new_owner: state.new_owner.may_load(deps.storage)?.map(|addr| addr.into()),
         stake_token: state.stake_token.load(deps.storage)?.denom,
         epoch_period: state.epoch_period.load(deps.storage)?,
         unbond_period: state.unbond_period.load(deps.storage)?,
         validators: state.validators.load(deps.storage)?,
         fee_config: state.fee_config.load(deps.storage)?,
+        stages_preset: state.stages_preset.load(deps.storage)?,
     })
 }
 

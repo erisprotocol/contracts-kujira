@@ -84,7 +84,9 @@ fn proper_instantiation() {
             fee_config: FeeConfig {
                 protocol_fee_contract: Addr::unchecked("fee"),
                 protocol_reward_fee: Decimal::from_ratio(1u128, 100u128)
-            }
+            },
+            operator: "operator".to_string(),
+            stages_preset: vec![vec![(Addr::unchecked("fin1"), "test".into())]],
         }
     );
 

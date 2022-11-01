@@ -185,6 +185,11 @@ pub struct ConfigResponse {
 
     /// Information about applied fees
     pub fee_config: FeeConfig,
+
+    /// Account who can call harvest
+    pub operator: String,
+    /// Stages that must be used by permissionless users
+    pub stages_preset: Vec<Vec<(Addr, Denom)>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
