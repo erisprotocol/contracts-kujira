@@ -1,15 +1,15 @@
 use cosmwasm_std::{
-    entry_point, to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult,
+    entry_point, to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult,
 };
 use cw2::set_contract_version;
 
 use eris::hub::{CallbackMsg, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
-use kujira::msg::KujiraMsg;
 
 use crate::constants::{CONTRACT_DENOM, CONTRACT_NAME, CONTRACT_VERSION};
+use crate::error::{ContractError, ContractResult};
 use crate::helpers::parse_received_fund;
 use crate::state::State;
-use crate::{execute, queries};
+use crate::{execute, gov, queries};
 
 #[entry_point]
 pub fn instantiate(
@@ -17,17 +17,12 @@ pub fn instantiate(
     env: Env,
     _info: MessageInfo,
     msg: InstantiateMsg,
-) -> StdResult<Response<KujiraMsg>> {
+) -> ContractResult {
     execute::instantiate(deps, env, msg)
 }
 
 #[entry_point]
-pub fn execute(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    msg: ExecuteMsg,
-) -> StdResult<Response<KujiraMsg>> {
+pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> ContractResult {
     let api = deps.api;
     match msg {
         ExecuteMsg::Bond {
@@ -68,15 +63,30 @@ pub fn execute(
             withdrawals,
             stages,
         } => execute::harvest(deps, env, withdrawals, stages, info.sender),
-        ExecuteMsg::Rebalance {} => execute::rebalance(deps, env, info.sender),
+        ExecuteMsg::TuneDelegations {} => execute::tune_delegations(deps, env, info.sender),
+        ExecuteMsg::Rebalance {
+            min_redelegation,
+        } => execute::rebalance(deps, env, info.sender, min_redelegation),
         ExecuteMsg::Reconcile {} => execute::reconcile(deps, env),
         ExecuteMsg::SubmitBatch {} => execute::submit_batch(deps, env),
+        ExecuteMsg::Vote {
+            proposal_id,
+            vote,
+        } => gov::vote(deps, env, info, proposal_id, vote),
+        ExecuteMsg::VoteWeighted {
+            proposal_id,
+            votes,
+        } => gov::vote_weighted(deps, env, info, proposal_id, votes),
         ExecuteMsg::Callback(callback_msg) => callback(deps, env, info, callback_msg),
+
         ExecuteMsg::UpdateConfig {
             protocol_fee_contract,
             protocol_reward_fee,
             operator,
             stages_preset,
+            allow_donations,
+            delegation_strategy,
+            vote_operator,
         } => execute::update_config(
             deps,
             info.sender,
@@ -84,6 +94,9 @@ pub fn execute(
             protocol_reward_fee,
             operator,
             stages_preset,
+            allow_donations,
+            delegation_strategy,
+            vote_operator,
         ),
         ExecuteMsg::QueueUnbond {
             receiver,
@@ -92,14 +105,11 @@ pub fn execute(
             let stake_token = state.stake_token.load(deps.storage)?;
 
             if info.funds.len() != 1 {
-                return Err(StdError::generic_err("expecting only single coin".to_string()));
+                return Err(ContractError::ExpectingSingleCoin {});
             }
 
             if info.funds[0].denom != stake_token.denom {
-                return Err(StdError::generic_err(format!(
-                    "expecting Stake token, received {}",
-                    info.funds[0].denom
-                )));
+                return Err(ContractError::ExpectingStakeToken(info.funds[0].denom.to_string()));
             }
 
             execute::queue_unbond(
@@ -117,9 +127,9 @@ fn callback(
     env: Env,
     info: MessageInfo,
     callback_msg: CallbackMsg,
-) -> StdResult<Response<KujiraMsg>> {
+) -> ContractResult {
     if env.contract.address != info.sender {
-        return Err(StdError::generic_err("callbacks can only be invoked by the contract itself"));
+        return Err(ContractError::CallbackOnlyCalledByContract {});
     }
 
     match callback_msg {
@@ -171,11 +181,15 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             limit,
             env,
         )?),
+        QueryMsg::WantedDelegations {} => to_binary(&queries::wanted_delegations(deps, env)?),
+        QueryMsg::SimulateWantedDelegations {
+            period,
+        } => to_binary(&queries::simulate_wanted_delegations(deps, env, period)?),
     }
 }
 
 #[entry_point]
-pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> StdResult<Response<KujiraMsg>> {
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> ContractResult {
     // let contract_version = get_contract_version(deps.storage)?;
 
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;

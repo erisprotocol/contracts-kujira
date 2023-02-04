@@ -3,11 +3,14 @@ use cw_storage_plus::{Index, IndexList, IndexedMap, Item, MultiIndex};
 
 use eris::{
     adapters::fin_multi::FinMulti,
-    hub::{Batch, FeeConfig, PendingBatch, StakeToken, UnbondRequest},
+    hub::{
+        Batch, DelegationStrategy, FeeConfig, PendingBatch, StakeToken, UnbondRequest,
+        WantedDelegationsShare,
+    },
 };
 use kujira::denom::Denom;
 
-use crate::types::BooleanKey;
+use crate::{error::ContractError, types::BooleanKey};
 
 pub(crate) struct State<'a> {
     /// Fin Multi Contract
@@ -38,6 +41,14 @@ pub(crate) struct State<'a> {
     pub unbond_requests: IndexedMap<'a, (u64, &'a Addr), UnbondRequest, UnbondRequestsIndexes<'a>>,
     /// Fee Config
     pub fee_config: Item<'a, FeeConfig>,
+    /// Delegation Strategy
+    pub delegation_strategy: Item<'a, DelegationStrategy<Addr>>,
+    /// Delegation Distribution
+    pub delegation_goal: Item<'a, WantedDelegationsShare>,
+    /// Operator who is allowed to vote on props
+    pub vote_operator: Item<'a, Addr>,
+    /// Specifies wether the contract allows donations
+    pub allow_donations: Item<'a, bool>,
 }
 
 impl Default for State<'static> {
@@ -71,6 +82,10 @@ impl Default for State<'static> {
             previous_batches: IndexedMap::new("previous_batches", pb_indexes),
             unbond_requests: IndexedMap::new("unbond_requests", ubr_indexes),
             fee_config: Item::new("fee_config"),
+            delegation_strategy: Item::new("delegation_strategy"),
+            delegation_goal: Item::new("delegation_goal"),
+            vote_operator: Item::new("vote_operator"),
+            allow_donations: Item::new("allow_donations"),
         }
     }
 }
@@ -91,6 +106,21 @@ impl<'a> State<'a> {
             Ok(())
         } else {
             Err(StdError::generic_err("unauthorized: sender is not operator"))
+        }
+    }
+
+    pub fn assert_vote_operator(
+        &self,
+        storage: &dyn Storage,
+        sender: &Addr,
+    ) -> Result<(), ContractError> {
+        let vote_operator =
+            self.vote_operator.load(storage).map_err(|_| ContractError::NoVoteOperatorSet {})?;
+
+        if *sender == vote_operator {
+            Ok(())
+        } else {
+            Err(ContractError::UnauthorizedSenderNotVoteOperator {})
         }
     }
 }

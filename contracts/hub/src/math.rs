@@ -1,10 +1,24 @@
-use std::{cmp, cmp::Ordering};
+use std::{
+    cmp,
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+};
 
-use cosmwasm_std::Uint128;
+use cosmwasm_std::{Addr, QuerierWrapper, StdResult, Storage, Uint128};
 
-use eris::hub::Batch;
+use eris::{
+    hub::{Batch, WantedDelegationsShare},
+    DecimalCheckedOps,
+};
 
-use crate::types::{Delegation, Redelegation, Undelegation};
+use crate::{
+    helpers::query_all_delegations,
+    state::State,
+    types::{Delegation, Redelegation, Undelegation},
+};
+
+type UtokenPerValidator =
+    (HashMap<String, Uint128>, Option<u128>, Option<u128>, Option<WantedDelegationsShare>);
 
 //--------------------------------------------------------------------------------------------------
 // Minting/burning logics
@@ -50,21 +64,23 @@ pub(crate) fn compute_unbond_amount(
 /// This function is based on Lido's implementation:
 /// https://github.com/lidofinance/lido-terra-contracts/blob/v1.0.2/contracts/lido_terra_validators_registry/src/common.rs#L55-102
 pub(crate) fn compute_undelegations(
+    state: &State,
+    storage: &dyn Storage,
     utoken_to_unbond: Uint128,
     current_delegations: &[Delegation],
-) -> Vec<Undelegation> {
+    validators: Vec<String>,
+) -> StdResult<Vec<Undelegation>> {
     let utoken_staked: u128 = current_delegations.iter().map(|d| d.amount).sum();
-    let validator_count = current_delegations.len() as u128;
-
     let utoken_to_distribute = utoken_staked - utoken_to_unbond.u128();
-    let utoken_per_validator = utoken_to_distribute / validator_count;
-    let remainder = utoken_to_distribute % validator_count;
+
+    let (utoken_per_validator, mut add, mut remove, _) =
+        get_utoken_per_validator(state, storage, utoken_to_distribute, &validators, None)?;
 
     let mut new_undelegations: Vec<Undelegation> = vec![];
     let mut utoken_available = utoken_to_unbond.u128();
-    for (i, d) in current_delegations.iter().enumerate() {
-        let remainder_for_validator: u128 = u128::from((i + 1) as u128 <= remainder);
-        let utoken_for_validator = utoken_per_validator + remainder_for_validator;
+    for (_, d) in merge_with_validators(current_delegations, validators).iter().enumerate() {
+        let utoken_for_validator =
+            get_utoken_for_validator(&utoken_per_validator, d, &mut add, &mut remove);
 
         let mut utoken_to_undelegate = if d.amount < utoken_for_validator {
             0
@@ -72,19 +88,21 @@ pub(crate) fn compute_undelegations(
             d.amount - utoken_for_validator
         };
 
-        utoken_to_undelegate = std::cmp::min(utoken_to_undelegate, utoken_available);
-        utoken_available -= utoken_to_undelegate;
-
         if utoken_to_undelegate > 0 {
-            new_undelegations.push(Undelegation::new(&d.validator, utoken_to_undelegate));
-        }
+            utoken_to_undelegate = std::cmp::min(utoken_to_undelegate, utoken_available);
+            utoken_available -= utoken_to_undelegate;
 
-        if utoken_available == 0 {
-            break;
+            if utoken_to_undelegate > 0 {
+                new_undelegations.push(Undelegation::new(&d.validator, utoken_to_undelegate));
+            }
+
+            if utoken_available == 0 {
+                break;
+            }
         }
     }
 
-    new_undelegations
+    Ok(new_undelegations)
 }
 
 /// Given a validator who is to be removed from the whitelist, and current delegations made to other
@@ -94,21 +112,23 @@ pub(crate) fn compute_undelegations(
 /// This function is based on Lido's implementation:
 /// https://github.com/lidofinance/lido-terra-contracts/blob/v1.0.2/contracts/lido_terra_validators_registry/src/common.rs#L19-L53
 pub(crate) fn compute_redelegations_for_removal(
+    state: &State,
+    storage: &dyn Storage,
     delegation_to_remove: &Delegation,
     current_delegations: &[Delegation],
-) -> Vec<Redelegation> {
+    validators: Vec<String>,
+) -> StdResult<Vec<Redelegation>> {
     let utoken_staked: u128 = current_delegations.iter().map(|d| d.amount).sum();
-    let validator_count = current_delegations.len() as u128;
-
     let utoken_to_distribute = utoken_staked + delegation_to_remove.amount;
-    let utoken_per_validator = utoken_to_distribute / validator_count;
-    let remainder = utoken_to_distribute % validator_count;
+
+    let (utoken_per_validator, mut add, mut remove, _) =
+        get_utoken_per_validator(state, storage, utoken_to_distribute, &validators, None)?;
 
     let mut new_redelegations: Vec<Redelegation> = vec![];
     let mut utoken_available = delegation_to_remove.amount;
-    for (i, d) in current_delegations.iter().enumerate() {
-        let remainder_for_validator: u128 = u128::from((i + 1) as u128 <= remainder);
-        let utoken_for_validator = utoken_per_validator + remainder_for_validator;
+    for (_, d) in merge_with_validators(current_delegations, validators).iter().enumerate() {
+        let utoken_for_validator =
+            get_utoken_for_validator(&utoken_per_validator, d, &mut add, &mut remove);
 
         let mut utoken_to_redelegate = if d.amount > utoken_for_validator {
             0
@@ -132,7 +152,48 @@ pub(crate) fn compute_redelegations_for_removal(
         }
     }
 
-    new_redelegations
+    Ok(new_redelegations)
+}
+
+fn merge_with_validators(
+    current_delegations: &[Delegation],
+    validators: Vec<String>,
+) -> Vec<Delegation> {
+    let hash: HashSet<_> = current_delegations.iter().map(|d| d.validator.to_string()).collect();
+
+    let mut delegations = current_delegations.to_vec();
+
+    for val in validators {
+        if !hash.contains(&val) {
+            delegations.push(Delegation {
+                validator: val,
+                amount: 0,
+            })
+        }
+    }
+
+    delegations
+}
+
+fn get_utoken_for_validator(
+    utoken_per_validator: &HashMap<String, Uint128>,
+    delegation: &Delegation,
+    add: &mut Option<u128>,
+    remove: &mut Option<u128>,
+) -> u128 {
+    let mut utoken_for_validator =
+        utoken_per_validator.get(&delegation.validator).map(|a| a.u128()).unwrap_or_default();
+    if let Some(add_set) = *add {
+        utoken_for_validator += add_set;
+        *add = None;
+    }
+    if let Some(remove_set) = *remove {
+        if utoken_for_validator >= remove_set {
+            utoken_for_validator -= remove_set;
+            *remove = None;
+        }
+    }
+    utoken_for_validator
 }
 
 /// Compute redelegation moves that will make each validator's delegation the targeted amount (hopefully
@@ -140,13 +201,15 @@ pub(crate) fn compute_redelegations_for_removal(
 ///
 /// This algorithm does not guarantee the minimal number of moves, but is the best I can some up with...
 pub(crate) fn compute_redelegations_for_rebalancing(
+    state: &State,
+    storage: &dyn Storage,
     current_delegations: &[Delegation],
-) -> Vec<Redelegation> {
+    validators: Vec<String>,
+) -> StdResult<Vec<Redelegation>> {
     let utoken_staked: u128 = current_delegations.iter().map(|d| d.amount).sum();
-    let validator_count = current_delegations.len() as u128;
 
-    let utoken_per_validator = utoken_staked / validator_count;
-    let remainder = utoken_staked % validator_count;
+    let (utoken_per_validator, mut add, mut remove, _) =
+        get_utoken_per_validator(state, storage, utoken_staked, &validators, None)?;
 
     // If a validator's current delegated amount is greater than the target amount, Token will be
     // redelegated _from_ them. They will be put in `src_validators` vector
@@ -154,9 +217,9 @@ pub(crate) fn compute_redelegations_for_rebalancing(
     // redelegated _to_ them. They will be put in `dst_validators` vector
     let mut src_delegations: Vec<Delegation> = vec![];
     let mut dst_delegations: Vec<Delegation> = vec![];
-    for (i, d) in current_delegations.iter().enumerate() {
-        let remainder_for_validator: u128 = u128::from((i + 1) as u128 <= remainder);
-        let utoken_for_validator = utoken_per_validator + remainder_for_validator;
+    for (_, d) in merge_with_validators(current_delegations, validators).iter().enumerate() {
+        let utoken_for_validator =
+            get_utoken_for_validator(&utoken_per_validator, d, &mut add, &mut remove);
 
         match d.amount.cmp(&utoken_for_validator) {
             Ordering::Greater => {
@@ -196,7 +259,75 @@ pub(crate) fn compute_redelegations_for_rebalancing(
         ));
     }
 
-    new_redelegations
+    Ok(new_redelegations)
+}
+
+/// Load utoken per validator
+/// If no goal is provided, the stored goal or uniform distribution is used.
+pub(crate) fn get_utoken_per_validator_prepared(
+    state: &State,
+    storage: &dyn Storage,
+    querier: &QuerierWrapper,
+    contract: &Addr,
+    goal: Option<WantedDelegationsShare>,
+) -> StdResult<UtokenPerValidator> {
+    let current_delegations = query_all_delegations(querier, contract)?;
+    let utoken_staked: u128 = current_delegations.iter().map(|d| d.amount).sum();
+    let validators = state.validators.load(storage)?;
+    get_utoken_per_validator(state, storage, utoken_staked, &validators, goal)
+}
+
+pub(crate) fn get_utoken_per_validator(
+    state: &State,
+    storage: &dyn Storage,
+    utoken_staked: u128,
+    validators: &[String],
+    goal: Option<WantedDelegationsShare>,
+) -> StdResult<UtokenPerValidator> {
+    let utoken_staked_uint = Uint128::new(utoken_staked);
+    let delegation_goal = if goal.is_some() {
+        goal
+    } else {
+        state.delegation_goal.may_load(storage)?
+    };
+
+    let utoken_per_validator: Option<HashMap<_, _>> =
+        if let Some(delegation_goal) = delegation_goal.clone() {
+            if !delegation_goal.shares.is_empty() {
+                // calculate via distribution
+                Some(
+                    delegation_goal
+                        .shares
+                        .into_iter()
+                        .map(|d| -> StdResult<(String, Uint128)> {
+                            Ok((d.0, d.1.checked_mul_uint(utoken_staked_uint)?))
+                        })
+                        .collect::<StdResult<HashMap<_, _>>>()?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+    let utoken_per_validator = utoken_per_validator.unwrap_or_else(|| {
+        let validator_count = validators.len() as u128;
+        let utoken_per_validator = utoken_staked / validator_count;
+        validators.iter().map(|d| (d.clone(), Uint128::new(utoken_per_validator))).collect()
+    });
+    let total: u128 = utoken_per_validator.iter().map(|a| a.1.u128()).sum();
+    let add = if total < utoken_staked {
+        Some(utoken_staked - total)
+    } else {
+        None
+    };
+    let remove = if total > utoken_staked {
+        Some(total - utoken_staked)
+    } else {
+        None
+    };
+    Ok((utoken_per_validator, add, remove, delegation_goal))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -213,13 +344,61 @@ pub(crate) fn reconcile_batches(batches: &mut [Batch], utoken_to_deduct: Uint128
     let batch_count = batches.len() as u128;
     let utoken_per_batch = utoken_to_deduct.u128() / batch_count;
     let remainder = utoken_to_deduct.u128() % batch_count;
+    let mut underflows: HashMap<usize, Uint128> = HashMap::default();
 
     for (i, batch) in batches.iter_mut().enumerate() {
         let remainder_for_batch: u128 = u128::from((i + 1) as u128 <= remainder);
         let utoken_for_batch = utoken_per_batch + remainder_for_batch;
+        let utoken_for_batch = Uint128::new(utoken_for_batch);
 
-        batch.utoken_unclaimed -= Uint128::new(utoken_for_batch);
+        // check for underflow
+        if batch.utoken_unclaimed < utoken_for_batch && batch_count > 1 {
+            underflows.insert(i, utoken_for_batch - batch.utoken_unclaimed);
+        }
+
+        batch.utoken_unclaimed = batch.utoken_unclaimed.saturating_sub(utoken_for_batch);
         batch.reconciled = true;
+    }
+
+    if !underflows.is_empty() {
+        let batch_count: u128 = batch_count - (underflows.len() as u128);
+        let to_deduct: Uint128 = underflows.iter().map(|v| v.1).sum();
+        let utoken_per_batch = to_deduct.u128() / batch_count;
+        let remainder = to_deduct.u128() % batch_count;
+        let mut remaining_underflow = Uint128::zero();
+        // distribute the underflows uniformly accross non-underflowing batches
+        for (i, batch) in batches.iter_mut().enumerate() {
+            if !batch.utoken_unclaimed.is_zero() {
+                let remainder_for_batch: u128 = u128::from((i + 1) as u128 <= remainder);
+                let utoken_for_batch = utoken_per_batch + remainder_for_batch;
+                let utoken_for_batch = Uint128::new(utoken_for_batch);
+
+                if batch.utoken_unclaimed < utoken_for_batch && batch_count > 1 {
+                    remaining_underflow += utoken_for_batch - batch.utoken_unclaimed;
+                }
+
+                batch.utoken_unclaimed = batch.utoken_unclaimed.saturating_sub(utoken_for_batch);
+            }
+        }
+
+        if !remaining_underflow.is_zero() {
+            // the remaining underflow will be applied by oldest batch first.
+            for (_, batch) in batches.iter_mut().enumerate() {
+                if !batch.utoken_unclaimed.is_zero() && !remaining_underflow.is_zero() {
+                    if batch.utoken_unclaimed >= remaining_underflow {
+                        batch.utoken_unclaimed -= remaining_underflow;
+                        remaining_underflow = Uint128::zero()
+                    } else {
+                        remaining_underflow -= batch.utoken_unclaimed;
+                        batch.utoken_unclaimed = Uint128::zero();
+                    }
+                }
+            }
+
+            if !remaining_underflow.is_zero() {
+                // no way to reconcile right now, need to top up some funds.
+            }
+        }
     }
 }
 

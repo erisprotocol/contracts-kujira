@@ -3,24 +3,29 @@ use std::str::FromStr;
 
 use cosmwasm_std::testing::{mock_env, mock_info, MockApi, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    coin, to_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, DistributionMsg, Event, Order,
-    OwnedDeps, StdError, StdResult, SubMsg, Uint128, WasmMsg,
+    coin, to_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, DistributionMsg, Event, Fraction,
+    GovMsg, Order, OwnedDeps, StdError, StdResult, SubMsg, Uint128, VoteOption, WasmMsg,
 };
 use eris::DecimalCheckedOps;
 
 use eris::hub::{
-    Batch, CallbackMsg, ConfigResponse, ExecuteMsg, FeeConfig, InstantiateMsg, PendingBatch,
-    QueryMsg, StakeToken, StateResponse, UnbondRequest, UnbondRequestsByBatchResponseItem,
-    UnbondRequestsByUserResponseItem, UnbondRequestsByUserResponseItemDetails,
+    Batch, CallbackMsg, ConfigResponse, DelegationStrategy, ExecuteMsg, FeeConfig, InstantiateMsg,
+    PendingBatch, QueryMsg, StakeToken, StateResponse, UnbondRequest,
+    UnbondRequestsByBatchResponseItem, UnbondRequestsByUserResponseItem,
+    UnbondRequestsByUserResponseItemDetails,
 };
+use itertools::Itertools;
 use kujira::msg::{DenomMsg, KujiraMsg};
+use protobuf::SpecialFields;
 
 use crate::constants::CONTRACT_DENOM;
 use crate::contract::{execute, instantiate};
-use crate::helpers::{dedupe, parse_coin, parse_received_fund};
+use crate::error::ContractError;
+use crate::helpers::{dedupe, parse_received_fund};
 use crate::math::{
     compute_redelegations_for_rebalancing, compute_redelegations_for_removal, compute_undelegations,
 };
+use crate::protos::proto::{self, MsgVoteWeighted, WeightedVoteOption};
 use crate::state::State;
 use crate::testing::helpers::{check_received_coin, query_helper_env, set_total_stake_supply};
 use crate::types::{Coins, Delegation, Redelegation, SendFee, Undelegation};
@@ -52,6 +57,8 @@ fn setup_test() -> OwnedDeps<MockStorage, MockApi, CustomQuerier> {
             protocol_reward_fee: Decimal::from_ratio(1u128, 100u128),
             operator: "operator".to_string(),
             stages_preset: None,
+            delegation_strategy: None,
+            vote_operator: None,
         },
     )
     .unwrap();
@@ -91,6 +98,9 @@ fn proper_instantiation() {
             },
             operator: "operator".to_string(),
             stages_preset: vec![],
+            allow_donations: false,
+            delegation_strategy: DelegationStrategy::Uniform,
+            vote_operator: None
         }
     );
 
@@ -271,6 +281,32 @@ fn donating() {
 
     deps.querier.set_bank_balances(&[coin(100 + 12345, CONTRACT_DENOM)]);
     // Charlie has the smallest amount of delegation, so the full deposit goes to him
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("user_2", &[Coin::new(12345, CONTRACT_DENOM)]),
+        ExecuteMsg::Donate {},
+    )
+    .unwrap_err();
+    assert_eq!(err, ContractError::DonationsDisabled {});
+
+    // allow donations
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("owner", &[Coin::new(12345, CONTRACT_DENOM)]),
+        ExecuteMsg::UpdateConfig {
+            protocol_fee_contract: None,
+            protocol_reward_fee: None,
+            operator: None,
+            stages_preset: None,
+            allow_donations: Some(true),
+            delegation_strategy: None,
+            vote_operator: None,
+        },
+    )
+    .unwrap();
+
     let res = execute(
         deps.as_mut(),
         mock_env(),
@@ -379,7 +415,7 @@ fn registering_unlocked_coins() {
     .unwrap();
     assert_eq!(
         res.events,
-        vec![Event::new("erishub/callback_received_coins")
+        vec![Event::new("erishub/received")
             .add_attribute("received_coin", 123.to_string() + CONTRACT_DENOM)]
     );
     assert_eq!(res.messages.len(), 0);
@@ -414,7 +450,7 @@ fn registering_unlocked_stake_coins() -> StdResult<()> {
     .unwrap();
     assert_eq!(
         res.events,
-        vec![Event::new("erishub/callback_received_coins")
+        vec![Event::new("erishub/received")
             .add_attribute("received_coin", 123.to_string() + CONTRACT_DENOM)]
     );
 
@@ -521,7 +557,7 @@ fn queuing_unbond() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("expecting Stake token, received random_token"));
+    assert_eq!(err, ContractError::ExpectingStakeToken("random_token".into()));
 
     // User 1 creates an unbonding request before `est_unbond_start_time` is reached. The unbond
     // request is saved, but not the pending batch is not submitted for unbonding
@@ -931,6 +967,146 @@ fn reconciling_even_when_everything_ok() {
 }
 
 #[test]
+fn reconciling_underflow() {
+    let mut deps = setup_test();
+    let state = State::default();
+    let previous_batches = vec![
+        Batch {
+            id: 1,
+            reconciled: true,
+            total_shares: Uint128::new(92876),
+            utoken_unclaimed: Uint128::new(95197), // 1.025 Token per Stake
+            est_unbond_end_time: 10000,
+        },
+        Batch {
+            id: 2,
+            reconciled: false,
+            total_shares: Uint128::new(1345),
+            utoken_unclaimed: Uint128::new(1385), // 1.030 Token per Stake
+            est_unbond_end_time: 20000,
+        },
+        Batch {
+            id: 3,
+            reconciled: false,
+            total_shares: Uint128::new(1456),
+            utoken_unclaimed: Uint128::new(1506), // 1.035 Token per Stake
+            est_unbond_end_time: 30000,
+        },
+        Batch {
+            id: 4,
+            reconciled: false,
+            total_shares: Uint128::new(1),
+            utoken_unclaimed: Uint128::new(1),
+            est_unbond_end_time: 30001,
+        },
+    ];
+    for previous_batch in &previous_batches {
+        state
+            .previous_batches
+            .save(deps.as_mut().storage, previous_batch.id, previous_batch)
+            .unwrap();
+    }
+    state
+        .unlocked_coins
+        .save(
+            deps.as_mut().storage,
+            &vec![
+                Coin::new(10000, CONTRACT_DENOM),
+                Coin::new(234, "ukrw"),
+                Coin::new(345, "uusd"),
+                Coin::new(
+                    69420,
+                    "ibc/0471F1C4E7AFD3F07702BEF6DC365268D64570F7C1FDC98EA6098DD6DE59817B",
+                ),
+            ],
+        )
+        .unwrap();
+    deps.querier.set_bank_balances(&[
+        Coin::new(12345, CONTRACT_DENOM),
+        Coin::new(234, "ukrw"),
+        Coin::new(345, "uusd"),
+        Coin::new(69420, "ibc/0471F1C4E7AFD3F07702BEF6DC365268D64570F7C1FDC98EA6098DD6DE59817B"),
+    ]);
+    execute(
+        deps.as_mut(),
+        mock_env_at_timestamp(35000),
+        mock_info("worker", &[]),
+        ExecuteMsg::Reconcile {},
+    )
+    .unwrap();
+}
+
+#[test]
+fn reconciling_underflow_second() {
+    let mut deps = setup_test();
+    let state = State::default();
+    let previous_batches = vec![
+        Batch {
+            id: 1,
+            reconciled: true,
+            total_shares: Uint128::new(92876),
+            utoken_unclaimed: Uint128::new(95197), // 1.025 Token per Stake
+            est_unbond_end_time: 10000,
+        },
+        Batch {
+            id: 2,
+            reconciled: false,
+            total_shares: Uint128::new(1345),
+            utoken_unclaimed: Uint128::new(1385), // 1.030 Token per Stake
+            est_unbond_end_time: 20000,
+        },
+        Batch {
+            id: 3,
+            reconciled: false,
+            total_shares: Uint128::new(176),
+            utoken_unclaimed: Uint128::new(183), // 1.035 Token per Stake
+            est_unbond_end_time: 30000,
+        },
+        Batch {
+            id: 4,
+            reconciled: false,
+            total_shares: Uint128::new(1),
+            utoken_unclaimed: Uint128::new(1),
+            est_unbond_end_time: 30001,
+        },
+    ];
+    for previous_batch in &previous_batches {
+        state
+            .previous_batches
+            .save(deps.as_mut().storage, previous_batch.id, previous_batch)
+            .unwrap();
+    }
+    state
+        .unlocked_coins
+        .save(
+            deps.as_mut().storage,
+            &vec![
+                Coin::new(10000, CONTRACT_DENOM),
+                Coin::new(234, "ukrw"),
+                Coin::new(345, "uusd"),
+                Coin::new(
+                    69420,
+                    "ibc/0471F1C4E7AFD3F07702BEF6DC365268D64570F7C1FDC98EA6098DD6DE59817B",
+                ),
+            ],
+        )
+        .unwrap();
+    deps.querier.set_bank_balances(&[
+        Coin::new(12345 - 1323, CONTRACT_DENOM),
+        Coin::new(234, "ukrw"),
+        Coin::new(345, "uusd"),
+        Coin::new(69420, "ibc/0471F1C4E7AFD3F07702BEF6DC365268D64570F7C1FDC98EA6098DD6DE59817B"),
+    ]);
+    execute(
+        deps.as_mut(),
+        mock_env_at_timestamp(35000),
+        mock_info("worker", &[]),
+        ExecuteMsg::Reconcile {},
+    )
+    .unwrap();
+}
+
+#[test]
 fn withdrawing_unbonded() {
     let mut deps = setup_test();
     let state = State::default();
@@ -1039,7 +1215,7 @@ fn withdrawing_unbonded() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("withdrawable amount is zero"));
+    assert_eq!(err, ContractError::CantBeZero("withdrawable amount".into()));
 
     // Attempt to withdraw once batches 1 and 2 have finished unbonding, but 3 has not yet
     //
@@ -1172,7 +1348,7 @@ fn adding_validator() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner"));
+    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner").into());
 
     let err = execute(
         deps.as_mut(),
@@ -1184,7 +1360,7 @@ fn adding_validator() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("validator is already whitelisted"));
+    assert_eq!(err, ContractError::ValidatorAlreadyWhitelisted("alice".into()));
 
     let res = execute(
         deps.as_mut(),
@@ -1231,7 +1407,7 @@ fn removing_validator() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner"));
+    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner").into());
 
     let err = execute(
         deps.as_mut(),
@@ -1243,7 +1419,7 @@ fn removing_validator() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("validator is not already whitelisted"));
+    assert_eq!(err, ContractError::ValidatorNotWhitelisted("dave".into()));
 
     // Target: (341667 + 341667 + 341666) / 2 = 512500
     // Remainder: 0
@@ -1289,7 +1465,7 @@ fn transferring_ownership() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner"));
+    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner").into());
 
     let res = execute(
         deps.as_mut(),
@@ -1314,7 +1490,7 @@ fn transferring_ownership() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not new owner"));
+    assert_eq!(err, ContractError::UnauthorizedSenderNotNewOwner {});
 
     let res =
         execute(deps.as_mut(), mock_env(), mock_info("jake", &[]), ExecuteMsg::AcceptOwnership {})
@@ -1353,10 +1529,13 @@ fn update_fee() {
             protocol_reward_fee: Some(Decimal::from_ratio(11u128, 100u128)),
             operator: None,
             stages_preset: None,
+            allow_donations: None,
+            delegation_strategy: None,
+            vote_operator: None,
         },
     )
     .unwrap_err();
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner"));
+    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner").into());
 
     let err = execute(
         deps.as_mut(),
@@ -1367,10 +1546,13 @@ fn update_fee() {
             protocol_reward_fee: Some(Decimal::from_ratio(11u128, 100u128)),
             operator: None,
             stages_preset: None,
+            allow_donations: None,
+            delegation_strategy: None,
+            vote_operator: None,
         },
     )
     .unwrap_err();
-    assert_eq!(err, StdError::generic_err("'protocol_reward_fee' greater than max"));
+    assert_eq!(err, ContractError::ProtocolRewardFeeTooHigh {});
 
     let res = execute(
         deps.as_mut(),
@@ -1381,6 +1563,9 @@ fn update_fee() {
             protocol_reward_fee: Some(Decimal::from_ratio(10u128, 100u128)),
             operator: None,
             stages_preset: None,
+            allow_donations: None,
+            delegation_strategy: None,
+            vote_operator: None,
         },
     )
     .unwrap();
@@ -1394,6 +1579,173 @@ fn update_fee() {
             protocol_fee_contract: Addr::unchecked("fee-new"),
             protocol_reward_fee: Decimal::from_ratio(10u128, 100u128)
         }
+    );
+}
+
+//--------------------------------------------------------------------------------------------------
+// Gov
+//--------------------------------------------------------------------------------------------------
+
+#[test]
+fn vote() {
+    let mut deps = setup_test();
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("jake", &[]),
+        ExecuteMsg::Vote {
+            proposal_id: 3,
+            vote: cosmwasm_std::VoteOption::Yes,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(res, ContractError::NoVoteOperatorSet {});
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("owner", &[]),
+        ExecuteMsg::UpdateConfig {
+            protocol_fee_contract: None,
+            protocol_reward_fee: None,
+            delegation_strategy: None,
+            allow_donations: None,
+            vote_operator: Some("vote_operator".to_string()),
+            operator: None,
+            stages_preset: None,
+        },
+    )
+    .unwrap();
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("jake", &[]),
+        ExecuteMsg::Vote {
+            proposal_id: 3,
+            vote: cosmwasm_std::VoteOption::Yes,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(res, ContractError::UnauthorizedSenderNotVoteOperator {});
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("vote_operator", &[]),
+        ExecuteMsg::Vote {
+            proposal_id: 3,
+            vote: cosmwasm_std::VoteOption::Yes,
+        },
+    )
+    .unwrap();
+    assert_eq!(res.messages.len(), 1);
+
+    assert_eq!(
+        res.messages[0],
+        SubMsg::new(CosmosMsg::Gov(GovMsg::Vote {
+            proposal_id: 3,
+            vote: cosmwasm_std::VoteOption::Yes
+        }))
+    );
+}
+
+#[test]
+fn vote_weighted() {
+    let mut deps = setup_test();
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("jake", &[]),
+        ExecuteMsg::VoteWeighted {
+            proposal_id: 3,
+            votes: vec![
+                (Decimal::from_str("0.4").unwrap(), VoteOption::Yes),
+                (Decimal::from_str("0.6").unwrap(), VoteOption::No),
+            ],
+        },
+    )
+    .unwrap_err();
+    assert_eq!(res, ContractError::NoVoteOperatorSet {});
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("owner", &[]),
+        ExecuteMsg::UpdateConfig {
+            protocol_fee_contract: None,
+            protocol_reward_fee: None,
+            delegation_strategy: None,
+            allow_donations: None,
+            vote_operator: Some("vote_operator".to_string()),
+            operator: None,
+            stages_preset: None,
+        },
+    )
+    .unwrap();
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("jake", &[]),
+        ExecuteMsg::VoteWeighted {
+            proposal_id: 3,
+            votes: vec![
+                (Decimal::from_str("0.4").unwrap(), VoteOption::Yes),
+                (Decimal::from_str("0.6").unwrap(), VoteOption::No),
+            ],
+        },
+    )
+    .unwrap_err();
+    assert_eq!(res, ContractError::UnauthorizedSenderNotVoteOperator {});
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info("vote_operator", &[]),
+        ExecuteMsg::VoteWeighted {
+            proposal_id: 3,
+            votes: vec![
+                (Decimal::from_str("0.1").unwrap(), VoteOption::Yes),
+                (Decimal::from_str("0.2").unwrap(), VoteOption::No),
+                (Decimal::from_str("0.3").unwrap(), VoteOption::Abstain),
+                (Decimal::from_str("0.4").unwrap(), VoteOption::NoWithVeto),
+            ],
+        },
+    )
+    .unwrap();
+    assert_eq!(res.messages.len(), 1);
+
+    assert_eq!(
+        res.messages[0].msg,
+        MsgVoteWeighted {
+            proposal_id: 3,
+            voter: MOCK_CONTRACT_ADDR.into(),
+            options: vec![
+                WeightedVoteOption {
+                    option: proto::VoteOption::VOTE_OPTION_YES.into(),
+                    weight: Decimal::from_str("0.1").unwrap().numerator().to_string(),
+                    special_fields: SpecialFields::default()
+                },
+                WeightedVoteOption {
+                    option: proto::VoteOption::VOTE_OPTION_NO.into(),
+                    weight: Decimal::from_str("0.2").unwrap().numerator().to_string(),
+                    special_fields: SpecialFields::default()
+                },
+                WeightedVoteOption {
+                    option: proto::VoteOption::VOTE_OPTION_ABSTAIN.into(),
+                    weight: Decimal::from_str("0.3").unwrap().numerator().to_string(),
+                    special_fields: SpecialFields::default()
+                },
+                WeightedVoteOption {
+                    option: proto::VoteOption::VOTE_OPTION_NO_WITH_VETO.into(),
+                    weight: Decimal::from_str("0.4").unwrap().numerator().to_string(),
+                    special_fields: SpecialFields::default()
+                },
+            ],
+            special_fields: SpecialFields::default()
+        }
+        .to_cosmos_msg()
     );
 }
 
@@ -1708,38 +2060,47 @@ fn querying_unbond_requests_details() {
 //--------------------------------------------------------------------------------------------------
 
 #[test]
-fn computing_undelegations() {
+fn computing_undelegations() -> StdResult<()> {
+    let deps = mock_dependencies();
+    let state = State::default();
     let current_delegations = vec![
         Delegation::new("alice", 400),
         Delegation::new("bob", 300),
         Delegation::new("charlie", 200),
     ];
-
     // Target: (400 + 300 + 200 - 451) / 3 = 149
     // Remainder: 2
-    // Alice:   400 - (149 + 1) = 250
-    // Bob:     300 - (149 + 1) = 150
+    // Alice:   400 - (149 + 2) = 249
+    // Bob:     300 - (149 + 0) = 151
     // Charlie: 200 - (149 + 0) = 51
-    let new_undelegations = compute_undelegations(Uint128::new(451), &current_delegations);
+    let new_undelegations = compute_undelegations(
+        &state,
+        deps.as_ref().storage,
+        Uint128::new(451),
+        &current_delegations,
+        current_delegations.iter().map(|a| a.validator.to_string()).collect_vec(),
+    )?;
     let expected = vec![
-        Undelegation::new("alice", 250),
-        Undelegation::new("bob", 150),
+        Undelegation::new("alice", 249),
+        Undelegation::new("bob", 151),
         Undelegation::new("charlie", 51),
     ];
     assert_eq!(new_undelegations, expected);
+    Ok(())
 }
 
 #[test]
-fn computing_redelegations_for_removal() {
+fn computing_redelegations_for_removal() -> StdResult<()> {
+    let deps = mock_dependencies();
+    let state = State::default();
     let current_delegations = vec![
         Delegation::new("alice", 13000),
         Delegation::new("bob", 12000),
         Delegation::new("charlie", 11000),
         Delegation::new("dave", 10000),
     ];
-
     // Suppose Dave will be removed
-    // utoken_per_validator = (13000 + 12000 + 11000 + 10000) / 3 = 15333
+    // uluna_per_validator = (13000 + 12000 + 11000 + 10000) / 3 = 15333
     // remainder = 1
     // to Alice:   15333 + 1 - 13000 = 2334
     // to Bob:     15333 + 0 - 12000 = 3333
@@ -1749,15 +2110,23 @@ fn computing_redelegations_for_removal() {
         Redelegation::new("dave", "bob", 3333),
         Redelegation::new("dave", "charlie", 4333),
     ];
-
     assert_eq!(
-        compute_redelegations_for_removal(&current_delegations[3], &current_delegations[..3]),
+        compute_redelegations_for_removal(
+            &state,
+            deps.as_ref().storage,
+            &current_delegations[3],
+            &current_delegations[..3],
+            current_delegations[..3].iter().map(|a| a.validator.to_string()).collect_vec()
+        )?,
         expected,
     );
+    Ok(())
 }
 
 #[test]
-fn computing_redelegations_for_rebalancing() {
+fn computing_redelegations_for_rebalancing() -> StdResult<()> {
+    let deps = mock_dependencies();
+    let state = State::default();
     let current_delegations = vec![
         Delegation::new("alice", 69420),
         Delegation::new("bob", 1234),
@@ -1765,78 +2134,137 @@ fn computing_redelegations_for_rebalancing() {
         Delegation::new("dave", 40471),
         Delegation::new("evan", 2345),
     ];
-
-    // utoken_per_validator = (69420 + 88888 + 1234 + 40471 + 2345) / 4 = 40471
+    // uluna_per_validator = (69420 + 88888 + 1234 + 40471 + 2345) / 4 = 40471
     // remainer = 3
     // src_delegations:
-    //  - alice:   69420 - (40471 + 1) = 28948
-    //  - charlie: 88888 - (40471 + 1) = 48416
+    //  - alice:   69420 - (40471 + 3) = 28946
+    //  - charlie: 88888 - (40471 + 0) = 48417
     // dst_delegations:
-    //  - bob:     (40471 + 1) - 1234  = 39238
+    //  - bob:     (40471 + 0) - 1234  = 39237
     //  - evan:    (40471 + 0) - 2345  = 38126
     //
-    // Round 1: alice --(28948)--> bob
+    // Round 1: alice --(28946)--> bob
     // src_delegations:
-    //  - charlie: 48416
+    //  - charlie: 48417
     // dst_delegations:
-    //  - bob:     39238 - 28948 = 10290
+    //  - bob:     39237 - 28946 = 10291
     //  - evan:    38126
     //
-    // Round 2: charlie --(10290)--> bob
+    // Round 2: charlie --(10291)--> bob
     // src_delegations:
-    //  - charlie: 48416 - 10290 = 38126
+    //  - charlie: 48417 - 10291 = 38126
     // dst_delegations:
     //  - evan:    38126
     //
     // Round 3: charlie --(38126)--> evan
     // Queues are emptied
     let expected = vec![
-        Redelegation::new("alice", "bob", 28948),
-        Redelegation::new("charlie", "bob", 10290),
+        Redelegation::new("alice", "bob", 28946),
+        Redelegation::new("charlie", "bob", 10291),
         Redelegation::new("charlie", "evan", 38126),
     ];
+    assert_eq!(
+        compute_redelegations_for_rebalancing(
+            &state,
+            deps.as_ref().storage,
+            &current_delegations,
+            current_delegations.iter().map(|a| a.validator.to_string()).collect_vec()
+        )?,
+        expected,
+    );
+    Ok(())
+}
 
-    assert_eq!(compute_redelegations_for_rebalancing(&current_delegations), expected,);
+#[test]
+fn computing_redelegations_for_rebalancing_complex() -> StdResult<()> {
+    let mut deps = mock_dependencies();
+    let state = State::default();
+    state.delegation_goal.save(
+        deps.as_mut().storage,
+        &eris::hub::WantedDelegationsShare {
+            tune_time: 0,
+            tune_period: 0,
+            shares: vec![
+                ("charlie".to_string(), Decimal::from_str("0.5")?),
+                ("alice".to_string(), Decimal::from_str("0.25")?),
+                ("bob".to_string(), Decimal::from_str("0.25")?),
+            ],
+        },
+    )?;
+    // ratio is good
+    let current_delegations = vec![
+        Delegation::new("alice", 50000),
+        Delegation::new("bob", 50000),
+        Delegation::new("charlie", 100000),
+    ];
+    assert_eq!(
+        compute_redelegations_for_rebalancing(
+            &state,
+            deps.as_ref().storage,
+            &current_delegations,
+            current_delegations.iter().map(|a| a.validator.to_string()).collect_vec()
+        )?,
+        vec![],
+    );
+    // ratio is bad
+    let current_delegations = vec![
+        Delegation::new("unlisted", 25000),
+        Delegation::new("alice", 25000),
+        Delegation::new("bob", 50000),
+        Delegation::new("charlie", 100000),
+    ];
+    assert_eq!(
+        compute_redelegations_for_rebalancing(
+            &state,
+            deps.as_ref().storage,
+            &current_delegations,
+            current_delegations.iter().map(|a| a.validator.to_string()).collect_vec()
+        )?,
+        vec![Redelegation::new("unlisted", "alice", 25000)],
+    );
+    // ratio is bad
+    let current_delegations = vec![
+        Delegation::new("charlie", 100000),
+        Delegation::new("unlisted", 50000),
+        Delegation::new("alice", 25000),
+        Delegation::new("bob", 25000),
+    ];
+    assert_eq!(
+        compute_redelegations_for_rebalancing(
+            &state,
+            deps.as_ref().storage,
+            &current_delegations,
+            current_delegations.iter().map(|a| a.validator.to_string()).collect_vec()
+        )?,
+        vec![
+            Redelegation::new("unlisted", "alice", 25000),
+            Redelegation::new("unlisted", "bob", 25000)
+        ],
+    );
+    // ratio is bad
+    let current_delegations = vec![
+        Delegation::new("charlie", 150002),
+        Delegation::new("alice", 20000),
+        Delegation::new("bob", 20000),
+    ];
+    assert_eq!(
+        compute_redelegations_for_rebalancing(
+            &state,
+            deps.as_ref().storage,
+            &current_delegations,
+            current_delegations.iter().map(|a| a.validator.to_string()).collect_vec()
+        )?,
+        vec![
+            Redelegation::new("charlie", "alice", 27500),
+            Redelegation::new("charlie", "bob", 27500)
+        ],
+    );
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
 // Coins
 //--------------------------------------------------------------------------------------------------
-
-#[test]
-fn parsing_coin() {
-    let coin = parse_coin("12345uatom").unwrap();
-    assert_eq!(coin, Coin::new(12345, "uatom"));
-
-    let coin =
-        parse_coin("23456ibc/0471F1C4E7AFD3F07702BEF6DC365268D64570F7C1FDC98EA6098DD6DE59817B")
-            .unwrap();
-    assert_eq!(
-        coin,
-        Coin::new(23456, "ibc/0471F1C4E7AFD3F07702BEF6DC365268D64570F7C1FDC98EA6098DD6DE59817B")
-    );
-
-    let err = parse_coin("69420").unwrap_err();
-    assert_eq!(err, StdError::generic_err("failed to parse coin: 69420"));
-
-    let err = parse_coin("ngmi").unwrap_err();
-    assert_eq!(err, StdError::generic_err("Parsing u128: cannot parse integer from empty string"));
-}
-
-#[test]
-fn parsing_coins() {
-    let coins = Coins::from_str("").unwrap();
-    assert_eq!(coins.0, vec![]);
-
-    let coins = Coins::from_str("12345uatom").unwrap();
-    assert_eq!(coins.0, vec![Coin::new(12345, "uatom")]);
-
-    let mut amount = "12345uatom,23456".to_owned();
-    amount.push_str(CONTRACT_DENOM);
-
-    let coins = Coins::from_str(amount.as_str()).unwrap();
-    assert_eq!(coins.0, vec![Coin::new(12345, "uatom"), Coin::new(23456, CONTRACT_DENOM)]);
-}
 
 #[test]
 fn adding_coins() {
@@ -1848,7 +2276,7 @@ fn adding_coins() {
     coins.add(&Coin::new(23456, CONTRACT_DENOM)).unwrap();
     assert_eq!(coins.0, vec![Coin::new(12345, "uatom"), Coin::new(23456, CONTRACT_DENOM)]);
 
-    coins.add_many(&Coins::from_str("76543uatom,69420uusd").unwrap()).unwrap();
+    coins.add_many(&Coins(vec![Coin::new(76543, "uatom"), Coin::new(69420, "uusd")])).unwrap();
     assert_eq!(
         coins.0,
         vec![Coin::new(88888, "uatom"), Coin::new(23456, CONTRACT_DENOM), Coin::new(69420, "uusd")]

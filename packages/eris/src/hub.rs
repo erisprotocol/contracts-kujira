@@ -1,10 +1,108 @@
+use std::{collections::HashSet, convert::TryInto};
+
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::{to_binary, Addr, Coin, CosmosMsg, Decimal, Empty, StdResult, Uint128, WasmMsg};
+use cosmwasm_std::{
+    to_binary, Addr, Api, Coin, CosmosMsg, Decimal, Empty, StdError, StdResult, Uint128,
+    VoteOption, WasmMsg,
+};
 use kujira::{denom::Denom, msg::KujiraMsg};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+use crate::{helper::addr_opt_validate, helpers::bps::BasicPoints};
+
+#[cw_serde]
+pub enum DelegationStrategy<T = String> {
+    /// all validators receive the same delegation.
+    Uniform,
+    Defined {
+        shares_bps: Vec<(String, u16)>,
+    },
+    /// validators receive delegations based on community voting + merit points
+    Gauges {
+        /// gauges based on vAmp voting
+        amp_gauges: T,
+        /// gauges based on eris merit points
+        emp_gauges: Option<T>,
+        /// weight between amp and emp gauges between 0 and 1
+        amp_factor_bps: u16,
+        /// min amount of delegation needed
+        min_delegation_bps: u16,
+        /// max amount of delegation needed
+        max_delegation_bps: u16,
+        /// count of validators that should receive delegations
+        validator_count: u8,
+    },
+}
+
+impl DelegationStrategy<String> {
+    pub fn validate(
+        self,
+        api: &dyn Api,
+        validators: &[String],
+    ) -> StdResult<DelegationStrategy<Addr>> {
+        let result = match self {
+            DelegationStrategy::Uniform {} => DelegationStrategy::Uniform {},
+
+            DelegationStrategy::Gauges {
+                amp_gauges,
+                emp_gauges,
+                amp_factor_bps: amp_factor,
+                min_delegation_bps,
+                validator_count,
+                max_delegation_bps,
+            } => DelegationStrategy::Gauges {
+                amp_gauges: api.addr_validate(&amp_gauges)?,
+                emp_gauges: addr_opt_validate(api, &emp_gauges)?,
+                amp_factor_bps: amp_factor,
+                min_delegation_bps,
+                validator_count,
+                max_delegation_bps,
+            },
+            DelegationStrategy::Defined {
+                shares_bps,
+            } => {
+                let mut duplicates = HashSet::new();
+                let bps = shares_bps
+                    .iter()
+                    .map(|(validator, d)| {
+                        if !validators.contains(validator) {
+                            return Err(StdError::generic_err(format!(
+                                "validator {0} not whitelisted",
+                                validator
+                            )))?;
+                        }
+
+                        if !duplicates.insert(validator.to_string()) {
+                            return Err(StdError::generic_err(format!(
+                                "validator {0} duplicated",
+                                validator
+                            )))?;
+                        }
+
+                        let bps: BasicPoints = (*d).try_into()?;
+                        Ok(bps)
+                    })
+                    .collect::<StdResult<Vec<BasicPoints>>>()?;
+
+                let result = bps
+                    .iter()
+                    .try_fold(BasicPoints::default(), |acc, bps| acc.checked_add(*bps))?;
+
+                if !result.is_max() {
+                    Err(StdError::generic_err("sum of shares is not 10000"))?;
+                }
+
+                DelegationStrategy::Defined {
+                    shares_bps,
+                }
+            },
+        };
+        Ok(result)
+    }
+}
+
+#[cw_serde]
 pub struct InstantiateMsg {
     /// fin multi contract addr
     pub fin_multi_contract: String,
@@ -29,10 +127,13 @@ pub struct InstantiateMsg {
     pub protocol_fee_contract: String,
     /// Fees that are being applied during reinvest of staking rewards
     pub protocol_reward_fee: Decimal, // "1 is 100%, 0.05 is 5%"
+    /// Strategy how delegations should be handled
+    pub delegation_strategy: Option<DelegationStrategy>,
+    /// Contract address that is allowed to vote
+    pub vote_operator: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
 pub enum ExecuteMsg {
     /// Bond specified amount of Token
     Bond {
@@ -63,12 +164,26 @@ pub enum ExecuteMsg {
         withdrawals: Option<Vec<(WithdrawType, Addr, Denom)>>,
         stages: Option<Vec<Vec<(Addr, Denom)>>>,
     },
+
+    TuneDelegations {},
     /// Use redelegations to balance the amounts of Token delegated to validators
-    Rebalance {},
+    Rebalance {
+        min_redelegation: Option<Uint128>,
+    },
     /// Update Token amounts in unbonding batches to reflect any slashing or rounding errors
     Reconcile {},
     /// Submit the current pending batch of unbonding requests to be unbonded
     SubmitBatch {},
+    /// Vote on a proposal (only allowed by the vote_operator)
+    Vote {
+        proposal_id: u64,
+        vote: VoteOption,
+    },
+    /// Vote on a proposal weighted (only allowed by the vote_operator)
+    VoteWeighted {
+        proposal_id: u64,
+        votes: Vec<(Decimal, VoteOption)>,
+    },
     /// Callbacks; can only be invoked by the contract itself
     Callback(CallbackMsg),
 
@@ -82,6 +197,12 @@ pub enum ExecuteMsg {
         operator: Option<String>,
         /// Sets the stages preset
         stages_preset: Option<Vec<Vec<(Addr, Denom)>>>,
+        /// Specifies wether donations are allowed.
+        allow_donations: Option<bool>,
+        /// Strategy how delegations should be handled
+        delegation_strategy: Option<DelegationStrategy>,
+        /// Update the vote_operator
+        vote_operator: Option<String>,
     },
 
     /// Submit an unbonding request to the current unbonding queue; automatically invokes `unbond`
@@ -135,6 +256,15 @@ pub enum QueryMsg {
     /// The contract's current state. Response: `StateResponse`
     #[returns(StateResponse)]
     State {},
+    /// The contract's current delegation distribution goal. Response: `WantedDelegationsResponse`
+    #[returns(WantedDelegationsResponse)]
+    WantedDelegations {},
+    /// The contract's delegation distribution goal based on period. Response: `WantedDelegationsResponse`
+    #[returns(WantedDelegationsResponse)]
+    SimulateWantedDelegations {
+        /// by default uses the next period to look into the future.
+        period: Option<u64>,
+    },
     /// The current batch on unbonding requests pending submission. Response: `PendingBatch`
     #[returns(PendingBatch)]
     PendingBatch {},
@@ -195,6 +325,13 @@ pub struct ConfigResponse {
     pub operator: String,
     /// Stages that must be used by permissionless users
     pub stages_preset: Vec<Vec<(Addr, Denom)>>,
+
+    /// Specifies wether donations are allowed.
+    pub allow_donations: bool,
+    /// Strategy how delegations should be handled
+    pub delegation_strategy: DelegationStrategy<Addr>,
+    /// Update the vote_operator
+    pub vote_operator: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -213,6 +350,19 @@ pub struct StateResponse {
     pub available: Uint128,
     // Total amount of utoken within the contract (bonded + unbonding + available)
     pub tvl_utoken: Uint128,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct WantedDelegationsResponse {
+    pub tune_time_period: Option<(u64, u64)>,
+    pub delegations: Vec<(String, Uint128)>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct WantedDelegationsShare {
+    pub tune_time: u64,
+    pub tune_period: u64,
+    pub shares: Vec<(String, Decimal)>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

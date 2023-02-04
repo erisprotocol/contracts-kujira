@@ -1,7 +1,13 @@
 // pub mod asset;
 pub mod adapters;
+pub mod amp_gauges;
+pub mod emp_gauges;
+pub mod governance_helper;
+pub mod helper;
+pub mod helpers;
 pub mod hub;
 pub mod querier;
+pub mod voting_escrow;
 
 mod extensions {
     use cosmwasm_std::{

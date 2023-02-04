@@ -10,13 +10,14 @@ use eris::adapters::bow_vault::BowExecuteMsg;
 use eris::adapters::bw_vault::BlackwhaleExecuteMsg;
 use eris::adapters::fin_multi::FinMultiExecuteMsg;
 use eris::hub::{
-    CallbackMsg, ConfigResponse, ExecuteMsg, FeeConfig, InstantiateMsg, PendingBatch, QueryMsg,
-    StateResponse, WithdrawType,
+    CallbackMsg, ConfigResponse, DelegationStrategy, ExecuteMsg, FeeConfig, InstantiateMsg,
+    PendingBatch, QueryMsg, StateResponse, WithdrawType,
 };
 use kujira::msg::{DenomMsg, KujiraMsg};
 
 use crate::constants::CONTRACT_DENOM;
 use crate::contract::{execute, instantiate};
+use crate::error::ContractError;
 use crate::testing::helpers::check_received_coin;
 use crate::types::Delegation;
 
@@ -51,6 +52,8 @@ fn setup_test() -> OwnedDeps<MockStorage, MockApi, CustomQuerier> {
             protocol_reward_fee: Decimal::from_ratio(1u128, 100u128),
             operator: "operator".to_string(),
             stages_preset: Some(vec![vec![(Addr::unchecked("fin1"), "test".into())]]),
+            vote_operator: Some("vote_operator".to_string()),
+            delegation_strategy: Some(DelegationStrategy::Uniform),
         },
     )
     .unwrap();
@@ -90,6 +93,9 @@ fn proper_instantiation() {
             },
             operator: "operator".to_string(),
             stages_preset: vec![vec![(Addr::unchecked("fin1"), "test".into())]],
+            allow_donations: false,
+            delegation_strategy: DelegationStrategy::Uniform,
+            vote_operator: Some("vote_operator".into())
         }
     );
 
@@ -224,7 +230,7 @@ fn claim_funds() -> StdResult<()> {
         }),
     )
     .unwrap_err();
-    assert_eq!(err, StdError::generic_err("callbacks can only be invoked by the contract itself"));
+    assert_eq!(err, ContractError::CallbackOnlyCalledByContract {});
 
     let res = execute(
         deps.as_mut(),
@@ -294,7 +300,7 @@ fn swap() -> StdResult<()> {
         }),
     )
     .unwrap_err();
-    assert_eq!(err, StdError::generic_err("callbacks can only be invoked by the contract itself"));
+    assert_eq!(err, ContractError::CallbackOnlyCalledByContract {});
 
     let err = execute(
         deps.as_mut(),
@@ -306,7 +312,7 @@ fn swap() -> StdResult<()> {
         }),
     )
     .unwrap_err();
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not operator"));
+    assert_eq!(err, StdError::generic_err("unauthorized: sender is not operator").into());
 
     let err = execute(
         deps.as_mut(),
@@ -318,7 +324,7 @@ fn swap() -> StdResult<()> {
         }),
     )
     .unwrap_err();
-    assert_eq!(err, StdError::generic_err(format!("swap from {} is not allowed", CONTRACT_DENOM)));
+    assert_eq!(err, ContractError::SwapFromNotAllowed(CONTRACT_DENOM.into()));
 
     let err = execute(
         deps.as_mut(),
@@ -330,7 +336,7 @@ fn swap() -> StdResult<()> {
         }),
     )
     .unwrap_err();
-    assert_eq!(err, StdError::generic_err(format!("swap from {} is not allowed", STAKE_DENOM)));
+    assert_eq!(err, ContractError::SwapFromNotAllowed(STAKE_DENOM.into()));
 
     deps.querier.set_bank_balances(&[
         coin(100, "test"),

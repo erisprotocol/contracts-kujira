@@ -1,5 +1,5 @@
 use cosmwasm_std::{
-    to_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, DepsMut, DistributionMsg, Env, Event,
+    attr, to_binary, Addr, BankMsg, Coin, CosmosMsg, Decimal, DepsMut, DistributionMsg, Env, Event,
     Order, Response, StdError, StdResult, Storage, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
@@ -9,21 +9,24 @@ use eris::{CustomResponse, DecimalCheckedOps};
 use eris::adapters::bw_vault::BlackWhaleVault;
 use eris::adapters::fin_multi::FinMulti;
 use eris::hub::{
-    Batch, CallbackMsg, ExecuteMsg, FeeConfig, InstantiateMsg, PendingBatch, StakeToken,
-    UnbondRequest, WithdrawType,
+    Batch, CallbackMsg, DelegationStrategy, ExecuteMsg, FeeConfig, InstantiateMsg, PendingBatch,
+    StakeToken, UnbondRequest, WithdrawType,
 };
 use kujira::denom::Denom;
 use kujira::msg::{DenomMsg, KujiraMsg};
 
 use crate::constants::{get_reward_fee_cap, CONTRACT_DENOM};
+use crate::error::{ContractError, ContractResult};
 use crate::helpers::{
-    addr_validate_to_lower, dedupe_check_received_addrs, query_delegation, query_delegations,
+    assert_validator_exists, assert_validators_exists, dedupe, get_wanted_delegations,
+    query_all_delegations, query_delegation, query_delegations,
 };
 use crate::math::{
     compute_mint_amount, compute_redelegations_for_rebalancing, compute_redelegations_for_removal,
     compute_unbond_amount, compute_undelegations, mark_reconciled_batches, reconcile_batches,
 };
 use crate::state::State;
+use crate::types::gauges::TuneInfoGaugeLoader;
 use crate::types::{Coins, Delegation, SendFee};
 
 const CONTRACT_NAME: &str = "eris-hub";
@@ -33,13 +36,21 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 // Instantiation
 //--------------------------------------------------------------------------------------------------
 
-pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> StdResult<Response<KujiraMsg>> {
+pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> ContractResult {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
     let state = State::default();
 
     if msg.protocol_reward_fee.gt(&get_reward_fee_cap()) {
-        return Err(StdError::generic_err("'protocol_reward_fee' greater than max"));
+        return Err(ContractError::ProtocolRewardFeeTooHigh {});
+    }
+
+    if msg.epoch_period == 0 {
+        return Err(ContractError::CantBeZero("epoch_period".into()));
+    }
+
+    if msg.unbond_period == 0 {
+        return Err(ContractError::CantBeZero("unbond_period".into()));
     }
 
     state.owner.save(deps.storage, &deps.api.addr_validate(&msg.owner)?)?;
@@ -47,9 +58,17 @@ pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> StdResult<Re
     state.epoch_period.save(deps.storage, &msg.epoch_period)?;
     state.unbond_period.save(deps.storage, &msg.unbond_period)?;
 
+    if let Some(vote_operator) = msg.vote_operator {
+        state.vote_operator.save(deps.storage, &deps.api.addr_validate(&vote_operator)?)?;
+    }
+
+    // by default donations are set to false
+    state.allow_donations.save(deps.storage, &false)?;
+
     let mut validators = msg.validators;
-    dedupe_check_received_addrs(&mut validators, deps.api)
-        .map_err(|err| StdError::generic_err(format!("invalid validators {}", err)))?;
+
+    dedupe(&mut validators);
+    assert_validators_exists(&deps.querier, &validators)?;
 
     state.validators.save(deps.storage, &validators)?;
     state.unlocked_coins.save(deps.storage, &vec![])?;
@@ -69,6 +88,11 @@ pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> StdResult<Re
             est_unbond_start_time: env.block.time.seconds() + msg.epoch_period,
         },
     )?;
+
+    let delegation_strategy = msg.delegation_strategy.unwrap_or(DelegationStrategy::Uniform);
+    state
+        .delegation_strategy
+        .save(deps.storage, &delegation_strategy.validate(deps.api, &validators)?)?;
 
     state
         .fin_multi
@@ -111,39 +135,26 @@ pub fn bond(
     receiver: Addr,
     token_to_bond: Uint128,
     donate: bool,
-) -> StdResult<Response<KujiraMsg>> {
+) -> ContractResult {
     let state = State::default();
     let mut stake = state.stake_token.load(deps.storage)?;
-    let validators = state.validators.load(deps.storage)?;
-
-    // Query the current delegations made to validators, and find the validator with the smallest
-    // delegated amount through a linear search
-    // The code for linear search is a bit uglier than using `sort_by` but cheaper: O(n) vs O(n * log(n))
-    let delegations = query_delegations(&deps.querier, &validators, &env.contract.address)?;
-    let mut validator = &delegations[0].validator;
-    let mut amount = delegations[0].amount;
-    for d in &delegations[1..] {
-        if d.amount < amount {
-            validator = &d.validator;
-            amount = d.amount;
-        }
-    }
-    let new_delegation = Delegation {
-        validator: validator.clone(),
-        amount: token_to_bond.u128(),
-    };
+    let (new_delegation, delegations) = find_new_delegation(&state, &deps, &env, token_to_bond)?;
 
     // Query the current supply of Staking Token and compute the amount to mint
     let ustake_supply = stake.total_supply;
     let ustake_to_mint = if donate {
+        match state.allow_donations.may_load(deps.storage)? {
+            Some(false) => Err(ContractError::DonationsDisabled {})?,
+            Some(true) | None => {
+                // if it is not set (backward compatibility) or set to true, donations are allowed
+            },
+        }
         Uint128::zero()
     } else {
         compute_mint_amount(ustake_supply, token_to_bond, &delegations)
     };
 
     let event = Event::new("erishub/bonded")
-        .add_attribute("time", env.block.time.seconds().to_string())
-        .add_attribute("height", env.block.height.to_string())
         .add_attribute("receiver", receiver.clone())
         .add_attribute("token_bonded", token_to_bond)
         .add_attribute("ustake_minted", ustake_to_mint);
@@ -179,21 +190,19 @@ pub fn harvest(
     withdrawals: Option<Vec<(WithdrawType, Addr, Denom)>>,
     stages: Option<Vec<Vec<(Addr, Denom)>>>,
     sender: Addr,
-) -> StdResult<Response<KujiraMsg>> {
+) -> ContractResult {
     let state = State::default();
 
     // 1. withdraw delegation rewards
-    let withdraw_submsgs: Vec<CosmosMsg<KujiraMsg>> = deps
-        .querier
-        .query_all_delegations(&env.contract.address)?
-        .into_iter()
-        .filter(|d| !d.amount.amount.is_zero())
-        .map(|d| {
-            CosmosMsg::Distribution(DistributionMsg::WithdrawDelegatorReward {
-                validator: d.validator,
+    let withdraw_submsgs: Vec<CosmosMsg<KujiraMsg>> =
+        query_all_delegations(&deps.querier, &env.contract.address)?
+            .into_iter()
+            .map(|d| {
+                CosmosMsg::Distribution(DistributionMsg::WithdrawDelegatorReward {
+                    validator: d.validator,
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>();
 
     let claim_funds_msg = withdrawals.map(|w| CallbackMsg::ClaimFunds {
         withdrawals: Some(w),
@@ -227,7 +236,7 @@ pub fn claim_funds(
     deps: DepsMut,
     env: Env,
     withdrawals: Option<Vec<(WithdrawType, Addr, Denom)>>,
-) -> StdResult<Response<KujiraMsg>> {
+) -> ContractResult {
     let mut withdraw_msgs: Vec<CosmosMsg<KujiraMsg>> = vec![];
     if let Some(withdrawals) = withdrawals {
         let balances = deps.querier.query_all_balances(env.contract.address)?;
@@ -260,7 +269,7 @@ pub fn swap(
     env: Env,
     mut stages: Option<Vec<Vec<(Addr, Denom)>>>,
     sender: Addr,
-) -> StdResult<Response<KujiraMsg>> {
+) -> ContractResult {
     let state = State::default();
 
     if stages.is_some() {
@@ -285,17 +294,14 @@ fn validate_no_kuji_or_ampkuji_swap(
     stages: &Option<Vec<Vec<(Addr, Denom)>>>,
     state: &State,
     storage: &dyn Storage,
-) -> StdResult<()> {
+) -> Result<(), ContractError> {
     if let Some(stages) = stages {
         let stake_token_denom = state.stake_token.load(storage)?.denom;
 
         for stage in stages {
             for (_addr, denom) in stage {
                 if denom.to_string() == CONTRACT_DENOM || denom.to_string() == stake_token_denom {
-                    return Err(StdError::generic_err(format!(
-                        "swap from {} is not allowed",
-                        denom,
-                    )));
+                    return Err(ContractError::SwapFromNotAllowed(denom.to_string()));
                 }
             }
         }
@@ -341,41 +347,26 @@ fn check_received_coin_msg(
 /// execution.
 /// 2. Same as with `bond`, in the latest implementation we only delegate staking rewards with the
 /// validator that has the smallest delegation amount.
-pub fn reinvest(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
+pub fn reinvest(deps: DepsMut, env: Env) -> ContractResult {
     let state = State::default();
-    let validators = state.validators.load(deps.storage)?;
     let mut unlocked_coins = state.unlocked_coins.load(deps.storage)?;
     let fee_config = state.fee_config.load(deps.storage)?;
 
     let utoken_available = unlocked_coins
         .iter()
         .find(|coin| coin.denom == CONTRACT_DENOM)
-        .ok_or_else(|| {
-            StdError::generic_err(format!("no {} available to be bonded", CONTRACT_DENOM))
-        })?
+        .ok_or_else(|| ContractError::NoTokensAvailable(CONTRACT_DENOM.into()))?
         .amount;
-
-    let delegations = query_delegations(&deps.querier, &validators, &env.contract.address)?;
-    let mut validator = &delegations[0].validator;
-    let mut amount = delegations[0].amount;
-    for d in &delegations[1..] {
-        if d.amount < amount {
-            validator = &d.validator;
-            amount = d.amount;
-        }
-    }
 
     let protocol_fee_amount = fee_config.protocol_reward_fee.checked_mul_uint(utoken_available)?;
     let utoken_to_bond = utoken_available.saturating_sub(protocol_fee_amount);
 
-    let new_delegation = Delegation::new(validator, utoken_to_bond.u128());
+    let (new_delegation, _) = find_new_delegation(&state, &deps, &env, utoken_to_bond)?;
 
     unlocked_coins.retain(|coin| coin.denom != CONTRACT_DENOM);
     state.unlocked_coins.save(deps.storage, &unlocked_coins)?;
 
     let event = Event::new("erishub/harvested")
-        .add_attribute("time", env.block.time.seconds().to_string())
-        .add_attribute("height", env.block.height.to_string())
         .add_attribute("utoken_bonded", utoken_to_bond)
         .add_attribute("utoken_protocol_fee", protocol_fee_amount);
 
@@ -397,12 +388,12 @@ pub fn callback_received_coins(
     env: Env,
     snapshot: Coin,
     snapshot_stake: Coin,
-) -> StdResult<Response<KujiraMsg>> {
+) -> ContractResult {
     // in some cosmwasm versions the events are not received in the callback
     // so each time the contract can receive some coins from rewards we also need to check after receiving some and add them to the unlocked_coins
 
     let mut received_coins = Coins(vec![]);
-    let mut event = Event::new("erishub/callback_received_coins");
+    let mut event = Event::new("erishub/received");
     let current_balance =
         deps.querier.query_balance(&env.contract.address, snapshot.denom.to_string())?.amount;
 
@@ -446,7 +437,63 @@ pub fn callback_received_coins(
     Ok(Response::new()
         .add_optional_message(burn_msg)
         .add_event(event)
-        .add_attribute("action", "erishub/callback_received_coins"))
+        .add_attribute("action", "erishub/received"))
+}
+
+/// searches for the validator with the least amount of delegations
+/// For Uniform mode, searches through the validators list
+/// For Gauge mode, searches for all delegations, and if nothing found, use the first validator from the list.
+fn find_new_delegation(
+    state: &State,
+    deps: &DepsMut,
+    env: &Env,
+    uluna_to_bond: Uint128,
+) -> Result<(Delegation, Vec<Delegation>), StdError> {
+    let delegation_strategy =
+        state.delegation_strategy.may_load(deps.storage)?.unwrap_or(DelegationStrategy::Uniform {});
+
+    let delegations = match delegation_strategy {
+        DelegationStrategy::Uniform {} => {
+            let validators = state.validators.load(deps.storage)?;
+            query_delegations(&deps.querier, &validators, &env.contract.address)?
+        },
+        DelegationStrategy::Gauges {
+            ..
+        }
+        | DelegationStrategy::Defined {
+            ..
+        } => {
+            // if we have gauges, only delegate to validators that have delegations, all others are "inactive"
+            let mut delegations = query_all_delegations(&deps.querier, &env.contract.address)?;
+            if delegations.is_empty() {
+                let validators = state.validators.load(deps.storage)?;
+
+                delegations = vec![Delegation {
+                    amount: 0,
+                    validator: validators.first().unwrap().to_string(),
+                }]
+            }
+            delegations
+        },
+    };
+
+    // Query the current delegations made to validators, and find the validator with the smallest
+    // delegated amount through a linear search
+    // The code for linear search is a bit uglier than using `sort_by` but cheaper: O(n) vs O(n * log(n))
+    let mut validator = &delegations[0].validator;
+    let mut amount = delegations[0].amount;
+
+    for d in &delegations[1..] {
+        // when using uniform distribution, it is allowed to bond anywhere
+        // otherwise bond only in one of the
+        if d.amount < amount {
+            validator = &d.validator;
+            amount = d.amount;
+        }
+    }
+    let new_delegation = Delegation::new(validator, uluna_to_bond.u128());
+
+    Ok((new_delegation, delegations))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -458,7 +505,7 @@ pub fn queue_unbond(
     env: Env,
     receiver: Addr,
     ustake_to_burn: Uint128,
-) -> StdResult<Response<KujiraMsg>> {
+) -> ContractResult {
     let state = State::default();
 
     let mut pending_batch = state.pending_batch.load(deps.storage)?;
@@ -484,16 +531,14 @@ pub fn queue_unbond(
     if env.block.time.seconds() >= pending_batch.est_unbond_start_time {
         start_time = "immediate".to_string();
         msgs.push(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: env.contract.address.clone().into(),
+            contract_addr: env.contract.address.into(),
             msg: to_binary(&ExecuteMsg::SubmitBatch {})?,
             funds: vec![],
         }));
     }
 
     let event = Event::new("erishub/unbond_queued")
-        .add_attribute("time", env.block.time.seconds().to_string())
         .add_attribute("est_unbond_start_time", start_time)
-        .add_attribute("height", env.block.height.to_string())
         .add_attribute("id", pending_batch.id.to_string())
         .add_attribute("receiver", receiver)
         .add_attribute("ustake_to_burn", ustake_to_burn);
@@ -504,7 +549,7 @@ pub fn queue_unbond(
         .add_attribute("action", "erishub/queue_unbond"))
 }
 
-pub fn submit_batch(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
+pub fn submit_batch(deps: DepsMut, env: Env) -> ContractResult {
     let state = State::default();
     let mut stake = state.stake_token.load(deps.storage)?;
     let validators = state.validators.load(deps.storage)?;
@@ -513,18 +558,16 @@ pub fn submit_batch(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
 
     let current_time = env.block.time.seconds();
     if current_time < pending_batch.est_unbond_start_time {
-        return Err(StdError::generic_err(format!(
-            "batch can only be submitted for unbonding after {}",
-            pending_batch.est_unbond_start_time
-        )));
+        return Err(ContractError::SubmitBatchAfter(pending_batch.est_unbond_start_time));
     }
 
-    let delegations = query_delegations(&deps.querier, &validators, &env.contract.address)?;
+    let delegations = query_all_delegations(&deps.querier, &env.contract.address)?;
     let ustake_supply = stake.total_supply;
 
     let utoken_to_unbond =
         compute_unbond_amount(ustake_supply, pending_batch.ustake_to_burn, &delegations);
-    let new_undelegations = compute_undelegations(utoken_to_unbond, &delegations);
+    let new_undelegations =
+        compute_undelegations(&state, deps.storage, utoken_to_unbond, &delegations, validators)?;
 
     state.previous_batches.save(
         deps.storage,
@@ -560,8 +603,6 @@ pub fn submit_batch(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
     .into();
 
     let event = Event::new("erishub/unbond_submitted")
-        .add_attribute("time", env.block.time.seconds().to_string())
-        .add_attribute("height", env.block.height.to_string())
         .add_attribute("id", pending_batch.id.to_string())
         .add_attribute("utoken_unbonded", utoken_to_unbond)
         .add_attribute("ustake_burned", pending_batch.ustake_to_burn);
@@ -574,7 +615,7 @@ pub fn submit_batch(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
         .add_attribute("action", "erishub/unbond"))
 }
 
-pub fn reconcile(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
+pub fn reconcile(deps: DepsMut, env: Env) -> ContractResult {
     let state = State::default();
     let current_time = env.block.time.seconds();
 
@@ -637,12 +678,7 @@ pub fn reconcile(deps: DepsMut, env: Env) -> StdResult<Response<KujiraMsg>> {
     Ok(Response::new().add_event(event).add_attribute("action", "erishub/reconcile"))
 }
 
-pub fn withdraw_unbonded(
-    deps: DepsMut,
-    env: Env,
-    user: Addr,
-    receiver: Addr,
-) -> StdResult<Response<KujiraMsg>> {
+pub fn withdraw_unbonded(deps: DepsMut, env: Env, user: Addr, receiver: Addr) -> ContractResult {
     let state = State::default();
     let current_time = env.block.time.seconds();
 
@@ -693,7 +729,7 @@ pub fn withdraw_unbonded(
     }
 
     if total_utoken_to_refund.is_zero() {
-        return Err(StdError::generic_err("withdrawable amount is zero"));
+        return Err(ContractError::CantBeZero("withdrawable amount".into()));
     }
 
     let refund_msg = CosmosMsg::Bank(BankMsg::Send {
@@ -702,8 +738,6 @@ pub fn withdraw_unbonded(
     });
 
     let event = Event::new("erishub/unbonded_withdrawn")
-        .add_attribute("time", env.block.time.seconds().to_string())
-        .add_attribute("height", env.block.height.to_string())
         .add_attribute("ids", ids.join(","))
         .add_attribute("user", user)
         .add_attribute("receiver", receiver)
@@ -715,18 +749,51 @@ pub fn withdraw_unbonded(
         .add_attribute("action", "erishub/withdraw_unbonded"))
 }
 
+pub fn tune_delegations(deps: DepsMut, env: Env, sender: Addr) -> ContractResult {
+    let state = State::default();
+    state.assert_owner(deps.storage, &sender)?;
+    let (wanted_delegations, save) =
+        get_wanted_delegations(&state, &env, deps.storage, &deps.querier, TuneInfoGaugeLoader {})?;
+    let attributes = if save {
+        state.delegation_goal.save(deps.storage, &wanted_delegations)?;
+        wanted_delegations
+            .shares
+            .iter()
+            .map(|a| attr("goal_delegation", format!("{0}={1}", a.0, a.1)))
+            .collect()
+    } else {
+        state.delegation_goal.remove(deps.storage);
+        // these would be boring, as all are the same
+        vec![]
+    };
+    Ok(Response::new()
+        .add_attribute("action", "erishub/tune_delegations")
+        .add_attributes(attributes))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Ownership and management logics
 //--------------------------------------------------------------------------------------------------
 
-pub fn rebalance(deps: DepsMut, env: Env, sender: Addr) -> StdResult<Response<KujiraMsg>> {
+pub fn rebalance(
+    deps: DepsMut,
+    env: Env,
+    sender: Addr,
+    min_redelegation: Option<Uint128>,
+) -> ContractResult {
+    let delegations = query_all_delegations(&deps.querier, &env.contract.address)?;
+
     let state = State::default();
     state.assert_owner(deps.storage, &sender)?;
     let validators = state.validators.load(deps.storage)?;
 
-    let delegations = query_delegations(&deps.querier, &validators, &env.contract.address)?;
+    let min_redelegation = min_redelegation.unwrap_or_default();
 
-    let new_redelegations = compute_redelegations_for_rebalancing(&delegations);
+    let new_redelegations =
+        compute_redelegations_for_rebalancing(&state, deps.storage, &delegations, validators)?
+            .into_iter()
+            .filter(|redelegation| redelegation.amount >= min_redelegation.u128())
+            .collect::<Vec<_>>();
 
     let redelegate_msgs = new_redelegations.iter().map(|rd| rd.to_cosmos_msg()).collect::<Vec<_>>();
 
@@ -734,32 +801,29 @@ pub fn rebalance(deps: DepsMut, env: Env, sender: Addr) -> StdResult<Response<Ku
 
     let event = Event::new("erishub/rebalanced").add_attribute("utoken_moved", amount.to_string());
 
+    let check_msg = if !redelegate_msgs.is_empty() {
+        // only check coins if a redelegation is happening
+        Some(check_received_coin_msg(&deps, &env, state.stake_token.load(deps.storage)?, None)?)
+    } else {
+        None
+    };
+
     Ok(Response::new()
         .add_messages(redelegate_msgs)
-        .add_message(check_received_coin_msg(
-            &deps,
-            &env,
-            state.stake_token.load(deps.storage)?,
-            None,
-        )?)
+        .add_optional_message(check_msg)
         .add_event(event)
         .add_attribute("action", "erishub/rebalance"))
 }
 
-pub fn add_validator(
-    deps: DepsMut,
-    sender: Addr,
-    validator: String,
-) -> StdResult<Response<KujiraMsg>> {
+pub fn add_validator(deps: DepsMut, sender: Addr, validator: String) -> ContractResult {
     let state = State::default();
 
     state.assert_owner(deps.storage, &sender)?;
-    // on kujira the addr_validate does not allow "kujiravaloper"-addresses
-    // addr_validate_to_lower(deps.api, validator.as_str())?;
+    assert_validator_exists(&deps.querier, &validator)?;
 
     state.validators.update(deps.storage, |mut validators| {
         if validators.contains(&validator) {
-            return Err(StdError::generic_err("validator is already whitelisted"));
+            return Err(ContractError::ValidatorAlreadyWhitelisted(validator.clone()));
         }
         validators.push(validator.clone());
         Ok(validators)
@@ -775,44 +839,66 @@ pub fn remove_validator(
     env: Env,
     sender: Addr,
     validator: String,
-) -> StdResult<Response<KujiraMsg>> {
+) -> ContractResult {
     let state = State::default();
 
     state.assert_owner(deps.storage, &sender)?;
 
     let validators = state.validators.update(deps.storage, |mut validators| {
         if !validators.contains(&validator) {
-            return Err(StdError::generic_err("validator is not already whitelisted"));
+            return Err(ContractError::ValidatorNotWhitelisted(validator.clone()));
         }
         validators.retain(|v| *v != validator);
         Ok(validators)
     })?;
 
-    let delegations = query_delegations(&deps.querier, &validators, &env.contract.address)?;
-    let delegation_to_remove = query_delegation(&deps.querier, &validator, &env.contract.address)?;
-    let new_redelegations = compute_redelegations_for_removal(&delegation_to_remove, &delegations);
+    let delegation_strategy =
+        state.delegation_strategy.may_load(deps.storage)?.unwrap_or(DelegationStrategy::Uniform);
 
-    let redelegate_msgs = new_redelegations.iter().map(|d| d.to_cosmos_msg()).collect::<Vec<_>>();
+    let redelegate_msgs = match delegation_strategy {
+        DelegationStrategy::Uniform => {
+            // only redelegate when old strategy
+            let delegations = query_delegations(&deps.querier, &validators, &env.contract.address)?;
+            let delegation_to_remove =
+                query_delegation(&deps.querier, &validator, &env.contract.address)?;
+            let new_redelegations = compute_redelegations_for_removal(
+                &state,
+                deps.storage,
+                &delegation_to_remove,
+                &delegations,
+                validators,
+            )?;
+
+            new_redelegations.iter().map(|d| d.to_cosmos_msg()).collect::<Vec<_>>()
+        },
+        DelegationStrategy::Gauges {
+            ..
+        }
+        | DelegationStrategy::Defined {
+            ..
+        } => {
+            // removed validators can have a delegation until the next tune, to keep undelegations in sync.
+            vec![]
+        },
+    };
 
     let event = Event::new("erishub/validator_removed").add_attribute("validator", validator);
 
+    let check_msg = if !redelegate_msgs.is_empty() {
+        // only check coins if a redelegation is happening
+        Some(check_received_coin_msg(&deps, &env, state.stake_token.load(deps.storage)?, None)?)
+    } else {
+        None
+    };
+
     Ok(Response::new()
         .add_messages(redelegate_msgs)
-        .add_message(check_received_coin_msg(
-            &deps,
-            &env,
-            state.stake_token.load(deps.storage)?,
-            None,
-        )?)
+        .add_optional_message(check_msg)
         .add_event(event)
         .add_attribute("action", "erishub/remove_validator"))
 }
 
-pub fn transfer_ownership(
-    deps: DepsMut,
-    sender: Addr,
-    new_owner: String,
-) -> StdResult<Response<KujiraMsg>> {
+pub fn transfer_ownership(deps: DepsMut, sender: Addr, new_owner: String) -> ContractResult {
     let state = State::default();
 
     state.assert_owner(deps.storage, &sender)?;
@@ -821,14 +907,14 @@ pub fn transfer_ownership(
     Ok(Response::new().add_attribute("action", "erishub/transfer_ownership"))
 }
 
-pub fn accept_ownership(deps: DepsMut, sender: Addr) -> StdResult<Response<KujiraMsg>> {
+pub fn accept_ownership(deps: DepsMut, sender: Addr) -> ContractResult {
     let state = State::default();
 
     let previous_owner = state.owner.load(deps.storage)?;
     let new_owner = state.new_owner.load(deps.storage)?;
 
     if sender != new_owner {
-        return Err(StdError::generic_err("unauthorized: sender is not new owner"));
+        return Err(ContractError::UnauthorizedSenderNotNewOwner {});
     }
 
     state.owner.save(deps.storage, &sender)?;
@@ -841,6 +927,7 @@ pub fn accept_ownership(deps: DepsMut, sender: Addr) -> StdResult<Response<Kujir
     Ok(Response::new().add_event(event).add_attribute("action", "erishub/transfer_ownership"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_config(
     deps: DepsMut,
     sender: Addr,
@@ -848,7 +935,10 @@ pub fn update_config(
     protocol_reward_fee: Option<Decimal>,
     operator: Option<String>,
     stages_preset: Option<Vec<Vec<(Addr, Denom)>>>,
-) -> StdResult<Response<KujiraMsg>> {
+    allow_donations: Option<bool>,
+    delegation_strategy: Option<DelegationStrategy>,
+    vote_operator: Option<String>,
+) -> ContractResult {
     let state = State::default();
 
     state.assert_owner(deps.storage, &sender)?;
@@ -862,7 +952,7 @@ pub fn update_config(
 
         if let Some(protocol_reward_fee) = protocol_reward_fee {
             if protocol_reward_fee.gt(&get_reward_fee_cap()) {
-                return Err(StdError::generic_err("'protocol_reward_fee' greater than max"));
+                return Err(ContractError::ProtocolRewardFeeTooHigh {});
             }
             fee_config.protocol_reward_fee = protocol_reward_fee;
         }
@@ -871,7 +961,7 @@ pub fn update_config(
     }
 
     if let Some(operator) = operator {
-        state.operator.save(deps.storage, &addr_validate_to_lower(deps.api, operator.as_str())?)?;
+        state.operator.save(deps.storage, &deps.api.addr_validate(operator.as_str())?)?;
     }
 
     if stages_preset.is_some() {
@@ -880,6 +970,21 @@ pub fn update_config(
 
     if let Some(stages_preset) = stages_preset {
         state.stages_preset.save(deps.storage, &stages_preset)?;
+    }
+
+    if let Some(delegation_strategy) = delegation_strategy {
+        let validators = state.validators.load(deps.storage)?;
+        state
+            .delegation_strategy
+            .save(deps.storage, &delegation_strategy.validate(deps.api, &validators)?)?;
+    }
+
+    if let Some(allow_donations) = allow_donations {
+        state.allow_donations.save(deps.storage, &allow_donations)?;
+    }
+
+    if let Some(vote_operator) = vote_operator {
+        state.vote_operator.save(deps.storage, &deps.api.addr_validate(&vote_operator)?)?;
     }
 
     Ok(Response::new().add_attribute("action", "erishub/update_config"))
