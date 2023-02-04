@@ -3,13 +3,14 @@ use cosmwasm_std::{
     Order, Response, StdError, StdResult, Storage, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
+use eris::adapters::bow_vault::BowVault;
 use eris::{CustomResponse, DecimalCheckedOps};
 
 use eris::adapters::bw_vault::BlackWhaleVault;
 use eris::adapters::fin_multi::FinMulti;
 use eris::hub::{
     Batch, CallbackMsg, ExecuteMsg, FeeConfig, InstantiateMsg, PendingBatch, StakeToken,
-    UnbondRequest,
+    UnbondRequest, WithdrawType,
 };
 use kujira::denom::Denom;
 use kujira::msg::{DenomMsg, KujiraMsg};
@@ -175,7 +176,7 @@ pub fn bond(
 pub fn harvest(
     deps: DepsMut,
     env: Env,
-    withdrawals: Option<Vec<(Addr, Denom)>>,
+    withdrawals: Option<Vec<(WithdrawType, Addr, Denom)>>,
     stages: Option<Vec<Vec<(Addr, Denom)>>>,
     sender: Addr,
 ) -> StdResult<Response<KujiraMsg>> {
@@ -225,18 +226,26 @@ pub fn harvest(
 pub fn claim_funds(
     deps: DepsMut,
     env: Env,
-    withdrawals: Option<Vec<(Addr, Denom)>>,
+    withdrawals: Option<Vec<(WithdrawType, Addr, Denom)>>,
 ) -> StdResult<Response<KujiraMsg>> {
     let mut withdraw_msgs: Vec<CosmosMsg<KujiraMsg>> = vec![];
     if let Some(withdrawals) = withdrawals {
         let balances = deps.querier.query_all_balances(env.contract.address)?;
 
-        for (addr, denom) in withdrawals {
+        for (withdraw_type, addr, denom) in withdrawals {
             let balance = balances.iter().find(|b| b.denom == denom.to_string());
 
             if let Some(coin) = balance {
                 if !coin.amount.is_zero() {
-                    withdraw_msgs.push(BlackWhaleVault(addr).withdraw_msg(denom, coin.amount)?);
+                    match withdraw_type {
+                        WithdrawType::BlackWhale => {
+                            withdraw_msgs
+                                .push(BlackWhaleVault(addr).withdraw_msg(denom, coin.amount)?);
+                        },
+                        WithdrawType::Bow => {
+                            withdraw_msgs.push(BowVault(addr).withdraw_msg(denom, coin.amount)?);
+                        },
+                    }
                 }
             }
         }

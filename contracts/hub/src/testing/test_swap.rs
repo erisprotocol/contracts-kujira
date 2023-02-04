@@ -6,11 +6,12 @@ use cosmwasm_std::{
     StdResult, SubMsg, Uint128, WasmMsg,
 };
 
+use eris::adapters::bow_vault::BowExecuteMsg;
 use eris::adapters::bw_vault::BlackwhaleExecuteMsg;
 use eris::adapters::fin_multi::FinMultiExecuteMsg;
 use eris::hub::{
     CallbackMsg, ConfigResponse, ExecuteMsg, FeeConfig, InstantiateMsg, PendingBatch, QueryMsg,
-    StateResponse,
+    StateResponse, WithdrawType,
 };
 use kujira::msg::{DenomMsg, KujiraMsg};
 
@@ -27,8 +28,10 @@ use super::helpers::{mock_dependencies, mock_env_at_timestamp, query_helper};
 //--------------------------------------------------------------------------------------------------
 
 pub const STAKE_DENOM: &str = "factory/cosmos2contract/stake";
-pub const BW_DENOM: &str = "factory/anycontract/btoken";
+pub const BW_DENOM1: &str = "factory/anycontract/btoken";
 pub const BW_DENOM2: &str = "factory/anycontract/btoken2";
+pub const BOW_DENOM1: &str = "factory/anycontract/bow1";
+pub const BOW_DENOM2: &str = "factory/anycontract/bow2";
 
 fn setup_test() -> OwnedDeps<MockStorage, MockApi, CustomQuerier> {
     let mut deps = mock_dependencies();
@@ -133,7 +136,11 @@ fn harvesting_with_options() {
         mock_info("worker", &[]),
         ExecuteMsg::Harvest {
             stages: Some(vec![vec![(Addr::unchecked("fin1"), "test".into())]]),
-            withdrawals: Some(vec![(Addr::unchecked("bw1"), BW_DENOM.into())]),
+            withdrawals: Some(vec![(
+                WithdrawType::BlackWhale,
+                Addr::unchecked("bw1"),
+                BW_DENOM1.into(),
+            )]),
         },
     )
     .unwrap();
@@ -163,7 +170,11 @@ fn harvesting_with_options() {
         SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
             contract_addr: MOCK_CONTRACT_ADDR.to_string(),
             msg: to_binary(&ExecuteMsg::Callback(CallbackMsg::ClaimFunds {
-                withdrawals: Some(vec![(Addr::unchecked("bw1"), BW_DENOM.into())]),
+                withdrawals: Some(vec![(
+                    WithdrawType::BlackWhale,
+                    Addr::unchecked("bw1"),
+                    BW_DENOM1.into()
+                )]),
             }))
             .unwrap(),
             funds: vec![]
@@ -198,14 +209,18 @@ fn harvesting_with_options() {
 #[test]
 fn claim_funds() -> StdResult<()> {
     let mut deps = setup_test();
-    deps.querier.set_bank_balances(&[coin(100, BW_DENOM)]);
+    deps.querier.set_bank_balances(&[coin(100, BW_DENOM1), coin(101, BOW_DENOM1)]);
 
     let err = execute(
         deps.as_mut(),
         mock_env(),
         mock_info("worker", &[]),
         ExecuteMsg::Callback(CallbackMsg::ClaimFunds {
-            withdrawals: Some(vec![(Addr::unchecked("bw1"), BW_DENOM.into())]),
+            withdrawals: Some(vec![(
+                WithdrawType::BlackWhale,
+                Addr::unchecked("bw1"),
+                BW_DENOM1.into(),
+            )]),
         }),
     )
     .unwrap_err();
@@ -217,18 +232,20 @@ fn claim_funds() -> StdResult<()> {
         mock_info(MOCK_CONTRACT_ADDR, &[]),
         ExecuteMsg::Callback(CallbackMsg::ClaimFunds {
             withdrawals: Some(vec![
-                (Addr::unchecked("bw1"), BW_DENOM.into()),
-                (Addr::unchecked("bw2"), BW_DENOM2.into()),
+                (WithdrawType::BlackWhale, Addr::unchecked("bw1"), BW_DENOM1.into()),
+                (WithdrawType::BlackWhale, Addr::unchecked("bw2"), BW_DENOM2.into()),
+                (WithdrawType::Bow, Addr::unchecked("bow1"), BOW_DENOM1.into()),
+                (WithdrawType::Bow, Addr::unchecked("bow2"), BOW_DENOM2.into()),
             ]),
         }),
     )
     .unwrap();
 
-    assert_eq!(res.messages.len(), 1);
+    assert_eq!(res.messages.len(), 2);
 
     let contract = "bw1";
     let amount = Uint128::new(100);
-    let denom = BW_DENOM;
+    let denom = BW_DENOM1;
 
     assert_eq!(
         res.messages[0],
@@ -241,6 +258,22 @@ fn claim_funds() -> StdResult<()> {
             msg: to_binary(&BlackwhaleExecuteMsg::WithdrawLiquidity {
                 amount,
             })?,
+        }))
+    );
+
+    let contract = "bow1";
+    let amount = Uint128::new(101);
+    let denom = BOW_DENOM1;
+
+    assert_eq!(
+        res.messages[1],
+        SubMsg::new(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: contract.to_string(),
+            funds: vec![Coin {
+                amount,
+                denom: denom.to_string(),
+            }],
+            msg: to_binary(&BowExecuteMsg::Withdraw {})?,
         }))
     );
 

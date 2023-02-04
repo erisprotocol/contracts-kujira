@@ -60,7 +60,7 @@ pub enum ExecuteMsg {
     AcceptOwnership {},
     /// Claim staking rewards, swap all for Token, and restake
     Harvest {
-        withdrawals: Option<Vec<(Addr, Denom)>>,
+        withdrawals: Option<Vec<(WithdrawType, Addr, Denom)>>,
         stages: Option<Vec<Vec<(Addr, Denom)>>>,
     },
     /// Use redelegations to balance the amounts of Token delegated to validators
@@ -91,11 +91,16 @@ pub enum ExecuteMsg {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
+pub enum WithdrawType {
+    BlackWhale,
+    Bow,
+}
+
+#[cw_serde]
 pub enum CallbackMsg {
     ClaimFunds {
-        withdrawals: Option<Vec<(Addr, Denom)>>,
+        withdrawals: Option<Vec<(WithdrawType, Addr, Denom)>>,
     },
     /// Swap remaining tokens held by the contract to Token
     Swap {

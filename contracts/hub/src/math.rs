@@ -63,11 +63,7 @@ pub(crate) fn compute_undelegations(
     let mut new_undelegations: Vec<Undelegation> = vec![];
     let mut utoken_available = utoken_to_unbond.u128();
     for (i, d) in current_delegations.iter().enumerate() {
-        let remainder_for_validator: u128 = if (i + 1) as u128 <= remainder {
-            1
-        } else {
-            0
-        };
+        let remainder_for_validator: u128 = u128::from((i + 1) as u128 <= remainder);
         let utoken_for_validator = utoken_per_validator + remainder_for_validator;
 
         let mut utoken_to_undelegate = if d.amount < utoken_for_validator {
@@ -111,11 +107,7 @@ pub(crate) fn compute_redelegations_for_removal(
     let mut new_redelegations: Vec<Redelegation> = vec![];
     let mut utoken_available = delegation_to_remove.amount;
     for (i, d) in current_delegations.iter().enumerate() {
-        let remainder_for_validator: u128 = if (i + 1) as u128 <= remainder {
-            1
-        } else {
-            0
-        };
+        let remainder_for_validator: u128 = u128::from((i + 1) as u128 <= remainder);
         let utoken_for_validator = utoken_per_validator + remainder_for_validator;
 
         let mut utoken_to_redelegate = if d.amount > utoken_for_validator {
@@ -163,11 +155,7 @@ pub(crate) fn compute_redelegations_for_rebalancing(
     let mut src_delegations: Vec<Delegation> = vec![];
     let mut dst_delegations: Vec<Delegation> = vec![];
     for (i, d) in current_delegations.iter().enumerate() {
-        let remainder_for_validator: u128 = if (i + 1) as u128 <= remainder {
-            1
-        } else {
-            0
-        };
+        let remainder_for_validator: u128 = u128::from((i + 1) as u128 <= remainder);
         let utoken_for_validator = utoken_per_validator + remainder_for_validator;
 
         match d.amount.cmp(&utoken_for_validator) {
@@ -227,11 +215,7 @@ pub(crate) fn reconcile_batches(batches: &mut [Batch], utoken_to_deduct: Uint128
     let remainder = utoken_to_deduct.u128() % batch_count;
 
     for (i, batch) in batches.iter_mut().enumerate() {
-        let remainder_for_batch: u128 = if (i + 1) as u128 <= remainder {
-            1
-        } else {
-            0
-        };
+        let remainder_for_batch: u128 = u128::from((i + 1) as u128 <= remainder);
         let utoken_for_batch = utoken_per_batch + remainder_for_batch;
 
         batch.utoken_unclaimed -= Uint128::new(utoken_for_batch);
