@@ -329,7 +329,7 @@ pub struct ConfigResponse {
     pub allow_donations: bool,
 
     /// Strategy how delegations should be handled
-    pub delegation_strategy: DelegationStrategy<Addr>,
+    pub delegation_strategy: DelegationStrategy<String>,
     /// Update the vote_operator
     pub vote_operator: Option<String>,
 }

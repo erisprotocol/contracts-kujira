@@ -32,10 +32,33 @@ pub fn config(deps: Deps) -> StdResult<ConfigResponse> {
         fee_config: state.fee_config.load(deps.storage)?,
         stages_preset: state.stages_preset.load(deps.storage)?,
         allow_donations: state.allow_donations.may_load(deps.storage)?.unwrap_or(false),
-        delegation_strategy: state
+        delegation_strategy: match state
             .delegation_strategy
             .may_load(deps.storage)?
-            .unwrap_or(eris::hub::DelegationStrategy::Uniform),
+            .unwrap_or(eris::hub::DelegationStrategy::Uniform)
+        {
+            eris::hub::DelegationStrategy::Uniform => eris::hub::DelegationStrategy::Uniform,
+            eris::hub::DelegationStrategy::Defined {
+                shares_bps,
+            } => eris::hub::DelegationStrategy::Defined {
+                shares_bps,
+            },
+            eris::hub::DelegationStrategy::Gauges {
+                amp_gauges,
+                emp_gauges,
+                amp_factor_bps,
+                min_delegation_bps,
+                max_delegation_bps,
+                validator_count,
+            } => eris::hub::DelegationStrategy::Gauges {
+                amp_gauges: amp_gauges.to_string(),
+                emp_gauges: emp_gauges.map(|a| a.to_string()),
+                amp_factor_bps,
+                min_delegation_bps,
+                max_delegation_bps,
+                validator_count,
+            },
+        },
         vote_operator: state.vote_operator.may_load(deps.storage)?.map(|addr| addr.into()),
     })
 }
