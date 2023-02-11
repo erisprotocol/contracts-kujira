@@ -4,7 +4,7 @@ use kujira::msg::KujiraMsg;
 use crate::constants::CONTRACT_DENOM;
 
 #[derive(Clone)]
-#[cfg_attr(test, derive(Debug, PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct Delegation {
     pub validator: String,
     pub amount: u128,
@@ -27,7 +27,7 @@ impl Delegation {
 }
 
 #[derive(Clone)]
-#[cfg_attr(test, derive(Debug, PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct SendFee {
     pub to_address: String,
     pub amount: u128,
@@ -49,7 +49,7 @@ impl SendFee {
     }
 }
 
-#[cfg_attr(test, derive(Debug, PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct Undelegation {
     pub validator: String,
     pub amount: u128,
@@ -71,7 +71,7 @@ impl Undelegation {
     }
 }
 
-#[cfg_attr(test, derive(Debug, PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct Redelegation {
     pub src: String,
     pub dst: String,

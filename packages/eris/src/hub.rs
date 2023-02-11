@@ -334,7 +334,7 @@ pub struct ConfigResponse {
     pub vote_operator: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct StateResponse {
     /// Total supply to the Stake token
     pub total_ustake: Uint128,
@@ -365,7 +365,7 @@ pub struct WantedDelegationsShare {
     pub shares: Vec<(String, Decimal)>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct PendingBatch {
     /// ID of this batch
     pub id: u64,
@@ -375,7 +375,7 @@ pub struct PendingBatch {
     pub est_unbond_start_time: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, Eq, JsonSchema)]
 pub struct StakeToken {
     // denom of the stake token
     pub denom: String,
@@ -383,7 +383,7 @@ pub struct StakeToken {
     pub total_supply: Uint128,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct FeeConfig {
     /// Contract address where fees are sent
     pub protocol_fee_contract: Addr,
@@ -391,7 +391,7 @@ pub struct FeeConfig {
     pub protocol_reward_fee: Decimal, // "1 is 100%, 0.05 is 5%"
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Batch {
     /// ID of this batch
     pub id: u64,
@@ -405,7 +405,7 @@ pub struct Batch {
     pub est_unbond_end_time: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct UnbondRequest {
     /// ID of the batch
     pub id: u64,
@@ -415,7 +415,7 @@ pub struct UnbondRequest {
     pub shares: Uint128,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct UnbondRequestsByBatchResponseItem {
     /// The user's address
     pub user: String,
@@ -432,7 +432,7 @@ impl From<UnbondRequest> for UnbondRequestsByBatchResponseItem {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct UnbondRequestsByUserResponseItem {
     /// ID of the batch
     pub id: u64,
@@ -449,7 +449,7 @@ impl From<UnbondRequest> for UnbondRequestsByUserResponseItem {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct UnbondRequestsByUserResponseItemDetails {
     /// ID of the batch
     pub id: u64,
