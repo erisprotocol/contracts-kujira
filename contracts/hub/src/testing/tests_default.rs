@@ -1348,7 +1348,7 @@ fn adding_validator() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner").into());
+    assert_eq!(err, ContractError::Unauthorized {});
 
     let err = execute(
         deps.as_mut(),
@@ -1407,7 +1407,7 @@ fn removing_validator() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner").into());
+    assert_eq!(err, ContractError::Unauthorized {});
 
     let err = execute(
         deps.as_mut(),
@@ -1465,7 +1465,7 @@ fn transferring_ownership() {
     )
     .unwrap_err();
 
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner").into());
+    assert_eq!(err, ContractError::Unauthorized {});
 
     let res = execute(
         deps.as_mut(),
@@ -1535,7 +1535,7 @@ fn update_fee() {
         },
     )
     .unwrap_err();
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not owner").into());
+    assert_eq!(err, ContractError::Unauthorized {});
 
     let err = execute(
         deps.as_mut(),

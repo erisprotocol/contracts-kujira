@@ -2,8 +2,8 @@ use std::vec;
 
 use cosmwasm_std::testing::{mock_env, mock_info, MockApi, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    coin, to_binary, Addr, Coin, CosmosMsg, Decimal, DistributionMsg, OwnedDeps, StdError,
-    StdResult, SubMsg, Uint128, WasmMsg,
+    coin, to_binary, Addr, Coin, CosmosMsg, Decimal, DistributionMsg, OwnedDeps, StdResult, SubMsg,
+    Uint128, WasmMsg,
 };
 
 use eris::adapters::bow_vault::BowExecuteMsg;
@@ -312,7 +312,7 @@ fn swap() -> StdResult<()> {
         }),
     )
     .unwrap_err();
-    assert_eq!(err, StdError::generic_err("unauthorized: sender is not operator").into());
+    assert_eq!(err, ContractError::UnauthorizedSenderNotOperator {});
 
     let err = execute(
         deps.as_mut(),

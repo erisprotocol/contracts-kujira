@@ -1,4 +1,4 @@
-use cosmwasm_std::{Addr, Coin, StdError, StdResult, Storage};
+use cosmwasm_std::{Addr, Coin, Storage};
 use cw_storage_plus::{Index, IndexList, IndexedMap, Item, MultiIndex};
 
 use eris::{
@@ -91,21 +91,25 @@ impl Default for State<'static> {
 }
 
 impl<'a> State<'a> {
-    pub fn assert_owner(&self, storage: &dyn Storage, sender: &Addr) -> StdResult<()> {
+    pub fn assert_owner(&self, storage: &dyn Storage, sender: &Addr) -> Result<(), ContractError> {
         let owner = self.owner.load(storage)?;
         if *sender == owner {
             Ok(())
         } else {
-            Err(StdError::generic_err("unauthorized: sender is not owner"))
+            Err(ContractError::Unauthorized {})
         }
     }
 
-    pub fn assert_operator(&self, storage: &dyn Storage, sender: &Addr) -> StdResult<()> {
+    pub fn assert_operator(
+        &self,
+        storage: &dyn Storage,
+        sender: &Addr,
+    ) -> Result<(), ContractError> {
         let operator = self.operator.load(storage)?;
         if *sender == operator {
             Ok(())
         } else {
-            Err(StdError::generic_err("unauthorized: sender is not operator"))
+            Err(ContractError::UnauthorizedSenderNotOperator {})
         }
     }
 

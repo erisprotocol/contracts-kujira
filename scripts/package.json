@@ -2,9 +2,7 @@
   "scripts": {
     "release": "bash build_release.sh",
     "coverage": "bash build_coverage.sh",
-    "schema": "yarn schema:create && yarn schema:ts",
-    "schema:create": "bash build_schema.sh",
-    "schema:ts": "cd .. && json2ts -i contracts/hub/**/*.json -o ../liquid-staking-scripts/types/hub && json2ts -i contracts/token/**/*.json -o ../liquid-staking-scripts/types/token"
+    "schema": "nps schema"
   },
   "dependencies": {
     "@terra-money/terra.js": "^3.0.8",

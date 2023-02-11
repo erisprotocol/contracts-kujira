@@ -109,7 +109,7 @@ pub fn instantiate(deps: DepsMut, env: Env, msg: InstantiateMsg) -> ContractResu
     )?;
 
     // needs to be validated after stake token has been set
-    validate_no_kuji_or_ampkuji_swap(&msg.stages_preset, &state, deps.storage)?;
+    validate_no_utoken_or_ustake_swap(&msg.stages_preset, &state, deps.storage)?;
     state.stages_preset.save(deps.storage, &msg.stages_preset.unwrap_or_default())?;
 
     Ok(Response::new().add_message(DenomMsg::Create {
@@ -278,7 +278,7 @@ pub fn swap(
         stages = Some(state.stages_preset.load(deps.storage)?);
     }
 
-    validate_no_kuji_or_ampkuji_swap(&stages, &state, deps.storage)?;
+    validate_no_utoken_or_ustake_swap(&stages, &state, deps.storage)?;
 
     let fin_multi = if let Some(stages) = stages {
         let balances = deps.querier.query_all_balances(env.contract.address)?;
@@ -290,7 +290,7 @@ pub fn swap(
     Ok(Response::new().add_optional_message(fin_multi).add_attribute("action", "erishub/swap"))
 }
 
-fn validate_no_kuji_or_ampkuji_swap(
+fn validate_no_utoken_or_ustake_swap(
     stages: &Option<Vec<Vec<(Addr, Denom)>>>,
     state: &State,
     storage: &dyn Storage,
@@ -389,6 +389,7 @@ pub fn callback_received_coins(
     snapshot: Coin,
     snapshot_stake: Coin,
 ) -> ContractResult {
+    let state = State::default();
     // in some cosmwasm versions the events are not received in the callback
     // so each time the contract can receive some coins from rewards we also need to check after receiving some and add them to the unlocked_coins
 
@@ -403,14 +404,13 @@ pub fn callback_received_coins(
         event = event.add_attribute("received_coin", amount.to_string() + snapshot.denom.as_str());
 
         received_coins.add(&Coin::new(amount.u128(), snapshot.denom))?;
-    }
 
-    let state = State::default();
-    state.unlocked_coins.update(deps.storage, |coins| -> StdResult<_> {
-        let mut coins = Coins(coins);
-        coins.add_many(&received_coins)?;
-        Ok(coins.0)
-    })?;
+        state.unlocked_coins.update(deps.storage, |coins| -> StdResult<_> {
+            let mut coins = Coins(coins);
+            coins.add_many(&received_coins)?;
+            Ok(coins.0)
+        })?;
+    }
 
     let current_balance_stake =
         deps.querier.query_balance(&env.contract.address, snapshot_stake.denom.to_string())?.amount;
@@ -965,7 +965,7 @@ pub fn update_config(
     }
 
     if stages_preset.is_some() {
-        validate_no_kuji_or_ampkuji_swap(&stages_preset, &state, deps.storage)?;
+        validate_no_utoken_or_ustake_swap(&stages_preset, &state, deps.storage)?;
     }
 
     if let Some(stages_preset) = stages_preset {

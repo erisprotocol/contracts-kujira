@@ -12,6 +12,7 @@ use kujira::msg::{DenomMsg, KujiraMsg};
 
 use crate::constants::CONTRACT_DENOM;
 use crate::contract::{execute, instantiate};
+use crate::error::ContractError;
 use crate::state::State;
 use crate::testing::helpers::check_received_coin;
 use crate::types::{Delegation, Redelegation};
@@ -345,7 +346,7 @@ fn bonding() {
         },
     )
     .unwrap_err();
-    assert_eq!(res, StdError::generic_err("unauthorized: sender is not owner").into());
+    assert_eq!(res, ContractError::Unauthorized {});
 
     let res = execute(
         deps.as_mut(),

@@ -325,9 +325,9 @@ pub struct ConfigResponse {
     pub operator: String,
     /// Stages that must be used by permissionless users
     pub stages_preset: Vec<Vec<(Addr, Denom)>>,
-
     /// Specifies wether donations are allowed.
     pub allow_donations: bool,
+
     /// Strategy how delegations should be handled
     pub delegation_strategy: DelegationStrategy<Addr>,
     /// Update the vote_operator

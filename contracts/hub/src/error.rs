@@ -26,6 +26,9 @@ pub enum ContractError {
     #[error("Unauthorized: sender is not vote operator")]
     UnauthorizedSenderNotVoteOperator {},
 
+    #[error("Unauthorized: sender is not operator")]
+    UnauthorizedSenderNotOperator {},
+
     #[error("Expecting only single coin")]
     ExpectingSingleCoin {},
 
