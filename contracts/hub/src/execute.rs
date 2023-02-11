@@ -484,8 +484,6 @@ fn find_new_delegation(
     let mut amount = delegations[0].amount;
 
     for d in &delegations[1..] {
-        // when using uniform distribution, it is allowed to bond anywhere
-        // otherwise bond only in one of the
         if d.amount < amount {
             validator = &d.validator;
             amount = d.amount;
