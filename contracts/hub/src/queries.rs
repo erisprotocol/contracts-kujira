@@ -1,7 +1,7 @@
 use cosmwasm_std::{Addr, Decimal, Deps, Env, Order, StdResult, Uint128};
 use cw_storage_plus::Bound;
 
-use eris::governance_helper::get_period;
+// use eris::governance_helper::get_period;
 use eris::hub::{
     Batch, ConfigResponse, PendingBatch, StateResponse, UnbondRequestsByBatchResponseItem,
     UnbondRequestsByUserResponseItem, UnbondRequestsByUserResponseItemDetails,
@@ -13,7 +13,7 @@ use crate::constants::CONTRACT_DENOM;
 use crate::helpers::{get_wanted_delegations, query_delegations};
 use crate::math::get_utoken_per_validator_prepared;
 use crate::state::State;
-use crate::types::gauges::PeriodGaugeLoader;
+// use crate::types::gauges::PeriodGaugeLoader;
 
 const MAX_LIMIT: u32 = 30;
 const DEFAULT_LIMIT: u32 = 10;
@@ -43,21 +43,21 @@ pub fn config(deps: Deps) -> StdResult<ConfigResponse> {
             } => eris::hub::DelegationStrategy::Defined {
                 shares_bps,
             },
-            eris::hub::DelegationStrategy::Gauges {
-                amp_gauges,
-                emp_gauges,
-                amp_factor_bps,
-                min_delegation_bps,
-                max_delegation_bps,
-                validator_count,
-            } => eris::hub::DelegationStrategy::Gauges {
-                amp_gauges: amp_gauges.to_string(),
-                emp_gauges: emp_gauges.map(|a| a.to_string()),
-                amp_factor_bps,
-                min_delegation_bps,
-                max_delegation_bps,
-                validator_count,
-            },
+            // eris::hub::DelegationStrategy::Gauges {
+            //     amp_gauges,
+            //     emp_gauges,
+            //     amp_factor_bps,
+            //     min_delegation_bps,
+            //     max_delegation_bps,
+            //     validator_count,
+            // } => eris::hub::DelegationStrategy::Gauges {
+            //     amp_gauges: amp_gauges.to_string(),
+            //     emp_gauges: emp_gauges.map(|a| a.to_string()),
+            //     amp_factor_bps,
+            //     min_delegation_bps,
+            //     max_delegation_bps,
+            //     validator_count,
+            // },
         },
         vote_operator: state.vote_operator.may_load(deps.storage)?.map(|addr| addr.into()),
     })
@@ -129,20 +129,20 @@ pub fn wanted_delegations(deps: Deps, env: Env) -> StdResult<WantedDelegationsRe
 pub fn simulate_wanted_delegations(
     deps: Deps,
     env: Env,
-    period: Option<u64>,
+    _period: Option<u64>,
 ) -> StdResult<WantedDelegationsResponse> {
     let state = State::default();
 
-    let period = period.unwrap_or(get_period(env.block.time.seconds())? + 1);
+    // let period = period.unwrap_or(get_period(env.block.time.seconds())? + 1);
 
     let (delegation_goal, _) = get_wanted_delegations(
         &state,
         &env,
         deps.storage,
         &deps.querier,
-        PeriodGaugeLoader {
-            period,
-        },
+        // PeriodGaugeLoader {
+        //     period,
+        // },
     )?;
 
     let (delegations, _, _, share) = get_utoken_per_validator_prepared(
