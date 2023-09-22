@@ -164,6 +164,8 @@ pub enum ExecuteMsg {
     },
     /// Accept an ownership transfer
     AcceptOwnership {},
+    /// Remove the ownership transfer proposal
+    DropOwnershipProposal {},
     /// Claim staking rewards, swap all for Token, and restake
     Harvest {
         withdrawals: Option<Vec<(WithdrawType, Addr, Denom)>>,
